@@ -359,6 +359,7 @@ check_deps() {
 
 install_glibc() {
     # Install glibc-runner for better compatibility
+    return 0
     log "开始安装 glibc-runner"
     echo -e "\n${YELLOW}[1.5/6] 正在安装 glibc-runner...${NC}"
     
