@@ -124,6 +124,8 @@ NPM_GLOBAL="$HOME/.npm-global"
 NPM_BIN="$NPM_GLOBAL/bin"
 LOG_DIR="$HOME/openclaw-logs"
 LOG_FILE="$LOG_DIR/install.log"
+# Gateway 会修改 process.title；匹配独立名称及其填充空白，不匹配安装脚本名称。
+GATEWAY_PROCESS_PATTERN='^openclaw-gateway([[:space:]]|$)|^([^[:space:]]*/)?node[[:space:]]+[^[:space:]]*/\.npm-global/lib/node_modules/openclaw/(openclaw\.mjs|dist/entry\.js)[[:space:]]+gateway([[:space:]]|$)'
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "[DRY-RUN] 不修改 HOME、npm 包、配置或服务；目标版本：${TARGET_VERSION:-latest（正式安装时解析并固定一次）}"
     if [ "$UNINSTALL" -eq 1 ]; then
@@ -159,7 +161,8 @@ run_cmd() {
         echo "[DRY-RUN] 跳过: $@"
         return 0
     else
-        "$@"
+        "$@" 2>&1 | tee -a "$LOG_FILE"
+        return "${PIPESTATUS[0]}"
     fi
 }
 
@@ -260,12 +263,16 @@ check_engine() {
 }
 
 wait_for_gateway() {
-    local attempt
-    for ((attempt=1; attempt<=30; attempt++)); do
-        if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null; then
-            return 0
+    local deadline remaining
+    deadline=$((SECONDS + 180))
+    while (( (remaining = deadline - SECONDS) > 0 )); do
+        if curl --fail --silent --max-time "$((remaining < 2 ? remaining : 2))" "http://127.0.0.1:$PORT/healthz" >/dev/null; then
+            (( SECONDS < deadline )) && return 0
+            break
         fi
-        [ "$attempt" -eq 30 ] || sleep 2
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        sleep "$((remaining < 2 ? remaining : 2))"
     done
     return 1
 }
@@ -347,14 +354,14 @@ configure_npm() {
                 return 1
             fi
         fi
-        if ! env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g "openclaw@$resolved" --ignore-scripts; then
+        if ! run_cmd env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g "openclaw@$resolved" --ignore-scripts; then
             echo -e "${RED}错误：Android 平台可能不支持所需原生模块；请改用 proot 安装。${NC}" >&2
             return 1
         fi
         [ "$(package_version "$BASE_DIR")" = "$resolved" ] || {
             echo -e "${RED}错误：安装后的包版本不等于 $resolved${NC}" >&2; return 1;
         }
-        (cd "$BASE_DIR" && npm run postinstall --if-present --ignore-scripts) || {
+        (cd "$BASE_DIR" && run_cmd npm run postinstall --if-present --ignore-scripts) || {
             echo -e "${RED}错误：OpenClaw postinstall 失败；Android 原生功能不支持时请使用 proot。${NC}" >&2
             return 1
         }
@@ -489,6 +496,7 @@ export TERMUX_VERSION=1
 export TMPDIR=\$HOME/tmp
 export OPENCLAW_GATEWAY_TOKEN=$TOKEN
 export PATH=$NPM_BIN:\$PATH
+GATEWAY_PROCESS_PATTERN='$GATEWAY_PROCESS_PATTERN'
 ${AUTOSTART_BLOCK}
 
 # OpenClaw 颜色定义
@@ -502,30 +510,33 @@ NC='\033[0m'
 # OpenClaw 服务管理函数
 ocr() {
     echo -e "\${YELLOW}正在启动/重启 OpenClaw 服务...\${NC}"
-    pkill -9 -f 'openclaw' 2>/dev/null
+    pkill -9 -f "\$GATEWAY_PROCESS_PATTERN" 2>/dev/null
     tmux kill-session -t openclaw 2>/dev/null
     sleep 1
     tmux new -d -s openclaw || return 1
     sleep 1
-    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured" C-m || return 1
-    local attempt
-    for ((attempt=1; attempt<=30; attempt++)); do
-        if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null; then break; fi
-        [ "\$attempt" -eq 30 ] || sleep 2
+    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured 2>&1 | tee '$LOG_DIR/runtime.log'" C-m || return 1
+    local deadline remaining
+    deadline=\$((SECONDS + 180))
+    while (( (remaining = deadline - SECONDS) > 0 )); do
+        if curl --fail --silent --max-time "\$((remaining < 2 ? remaining : 2))" "http://127.0.0.1:$PORT/healthz" >/dev/null; then
+            (( SECONDS < deadline )) || break
+            echo ""
+            echo -e "\${GREEN}✅ Gateway /healthz 已就绪（不代表模型功能可用）\${NC}"
+            echo -e "\${CYAN}本机访问: http://localhost:$PORT/?token=\$OPENCLAW_GATEWAY_TOKEN\${NC}"
+            echo "   1. 本手机浏览器打开: http://localhost:$PORT/?token=\$OPENCLAW_GATEWAY_TOKEN"
+            echo "   2. 或运行命令: openclaw tui"
+            echo "   3. 或使用 Telegram 机器人(若已配置)"
+            echo ""
+            echo -e "\${BLUE}💡 oclog 查看日志 | ockill 停止服务\${NC}"
+            return 0
+        fi
+        remaining=\$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        sleep "\$((remaining < 2 ? remaining : 2))"
     done
-    if [ "\$attempt" -le 30 ]; then
-        echo ""
-        echo -e "\${GREEN}✅ Gateway /healthz 已就绪（不代表模型功能可用）\${NC}"
-        echo -e "\${CYAN}本机访问: http://localhost:$PORT/?token=\$OPENCLAW_GATEWAY_TOKEN\${NC}"
-        echo "   1. 本手机浏览器打开: http://localhost:$PORT/?token=\$OPENCLAW_GATEWAY_TOKEN"
-        echo "   2. 或运行命令: openclaw tui"
-        echo "   3. 或使用 Telegram 机器人(若已配置)"
-        echo ""
-        echo -e "\${BLUE}💡 oclog 查看日志 | ockill 停止服务\${NC}"
-    else
-        echo -e "\${RED}❌ Gateway 未在规定时间内通过 HTTP /healthz，请查看 oclog；Android 原生功能不支持时请使用 proot。\${NC}"
-        return 1
-    fi
+    echo -e "\${RED}❌ Gateway 在 180 秒内未通过 http://127.0.0.1:$PORT/healthz；可能仍在启动，请查看 oclog 或 $LOG_DIR/runtime.log。超时不会停止 Gateway。\${NC}" >&2
+    return 1
 }
 
 oclog() {
@@ -538,10 +549,10 @@ oclog() {
 
 ockill() {
     echo -e "\${YELLOW}正在停止 OpenClaw 服务...\${NC}"
-    pkill -9 -f "openclaw" 2>/dev/null
+    pkill -9 -f "\$GATEWAY_PROCESS_PATTERN" 2>/dev/null
     tmux kill-session -t openclaw 2>/dev/null
     sleep 1
-    if ! tmux has-session -t openclaw 2>/dev/null && ! pgrep -f "openclaw" > /dev/null; then
+    if ! tmux has-session -t openclaw 2>/dev/null && ! pgrep -f "\$GATEWAY_PROCESS_PATTERN" > /dev/null; then
         echo -e "\${GREEN}✅ OpenClaw 服务已停止\${NC}"
     else
         echo -e "\${RED}❌ 服务停止失败，请手动检查\${NC}"
@@ -577,7 +588,7 @@ start_service() {
     echo -e "${YELLOW}[5/6] 启动服务...${NC}"
 
     # 检查是否有实例在运行
-    RUNNING_PROCESS=$(pgrep -f "openclaw gateway" 2>/dev/null || true)
+    RUNNING_PROCESS=$(pgrep -f "$GATEWAY_PROCESS_PATTERN" 2>/dev/null || true)
     HAS_TMUX_SESSION=$(tmux has-session -t openclaw 2>/dev/null && echo "yes" || echo "no")
 
     if [ -n "$RUNNING_PROCESS" ] || [ "$HAS_TMUX_SESSION" = "yes" ]; then
@@ -590,8 +601,8 @@ start_service() {
         if [ "$RESTART_CHOICE" = "y" ] || [ "$RESTART_CHOICE" = "Y" ]; then
             log "停止旧实例"
             echo -e "${YELLOW}正在停止旧实例...${NC}"
-            # 只停止 openclaw 相关进程，不杀死所有 node 进程
-            pkill -9 -f "openclaw" 2>/dev/null || true
+            # 只停止本安装器管理的 Gateway 入口，不杀死其他 OpenClaw 或 Node.js 进程
+            pkill -9 -f "$GATEWAY_PROCESS_PATTERN" 2>/dev/null || true
             tmux kill-session -t openclaw 2>/dev/null || true
             sleep 1
         else
@@ -600,7 +611,7 @@ start_service() {
                 echo -e "${GREEN}现有 Gateway HTTP /healthz 已就绪（不代表模型功能可用）${NC}"
                 return 0
             fi
-            echo -e "${RED}错误：现有 Gateway 未通过 HTTP /healthz${NC}" >&2
+            echo -e "${RED}错误：现有 Gateway 在 180 秒内未通过 http://127.0.0.1:$PORT/healthz；可能仍在启动，请查看 $LOG_DIR/runtime.log。超时不会停止 Gateway。${NC}" >&2
             return 1
         fi
     fi
@@ -623,7 +634,7 @@ start_service() {
     if wait_for_gateway; then
         echo -e "${GREEN}[6/6] ✅ Gateway HTTP /healthz 已就绪（不代表模型功能可用）${NC}"
     else
-        echo -e "${RED}错误：Gateway 未在规定时间内通过 HTTP /healthz；请检查 $LOG_DIR/runtime.log。Android 原生功能不支持时请使用 proot。${NC}" >&2
+        echo -e "${RED}错误：Gateway 在 180 秒内未通过 http://127.0.0.1:$PORT/healthz；可能仍在启动，请查看 $LOG_DIR/runtime.log。超时不会停止 Gateway。${NC}" >&2
         return 1
     fi
 }
@@ -635,7 +646,7 @@ uninstall_openclaw() {
 
     # 停止服务
     echo -e "${YELLOW}停止服务...${NC}"
-    run_cmd pkill -9 -f "openclaw" 2>/dev/null || true
+    run_cmd pkill -9 -f "$GATEWAY_PROCESS_PATTERN" 2>/dev/null || true
     run_cmd tmux kill-session -t openclaw 2>/dev/null || true
     log "服务已停止"
 
@@ -853,7 +864,7 @@ if [[ "$CONTINUE_ONBOARD" =~ ^[Yy]$ ]]; then
             log "已更新 openclaw.json 中的 token 为环境变量引用"
             # 重启 gateway 使新 token 生效
             echo -e "${YELLOW}正在重启 Gateway 服务以应用新 Token...${NC}"
-            pkill -9 -f 'openclaw' 2>/dev/null || true
+            pkill -9 -f "$GATEWAY_PROCESS_PATTERN" 2>/dev/null || true
             tmux kill-session -t openclaw 2>/dev/null || true
             sleep 1
             tmux new -d -s openclaw
@@ -863,7 +874,7 @@ if [[ "$CONTINUE_ONBOARD" =~ ^[Yy]$ ]]; then
                 log "Gateway HTTP 就绪"
                 echo -e "${GREEN}✅ Gateway /healthz 就绪（不代表模型功能可用）${NC}"
             else
-                echo -e "${RED}错误：Gateway 重启后未通过 HTTP /healthz，请检查日志；Android 原生功能不支持时请使用 proot。${NC}" >&2
+                echo -e "${RED}错误：Gateway 重启后在 180 秒内未通过 http://127.0.0.1:$PORT/healthz；可能仍在启动，请查看 $LOG_DIR/runtime.log。超时不会停止 Gateway。${NC}" >&2
                 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 || return 1
             fi
         else

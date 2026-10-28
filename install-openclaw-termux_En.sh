@@ -124,6 +124,8 @@ NPM_GLOBAL="$HOME/.npm-global"
 NPM_BIN="$NPM_GLOBAL/bin"
 LOG_DIR="$HOME/openclaw-logs"
 LOG_FILE="$LOG_DIR/install.log"
+# Gateway changes process.title; allow its padded name without matching installer names.
+GATEWAY_PROCESS_PATTERN='^openclaw-gateway([[:space:]]|$)|^([^[:space:]]*/)?node[[:space:]]+[^[:space:]]*/\.npm-global/lib/node_modules/openclaw/(openclaw\.mjs|dist/entry\.js)[[:space:]]+gateway([[:space:]]|$)'
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "[DRY-RUN] No HOME, npm package, configuration or service changes; target: ${TARGET_VERSION:-latest (resolved and pinned once during installation)}"
     if [ "$UNINSTALL" -eq 1 ]; then
@@ -159,7 +161,8 @@ run_cmd() {
         echo "[DRY-RUN] Skipping: $@"
         return 0
     else
-        "$@"
+        "$@" 2>&1 | tee -a "$LOG_FILE"
+        return "${PIPESTATUS[0]}"
     fi
 }
 
@@ -258,12 +261,16 @@ check_engine() {
 }
 
 wait_for_gateway() {
-    local attempt
-    for ((attempt=1; attempt<=30; attempt++)); do
-        if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null; then
-            return 0
+    local deadline remaining
+    deadline=$((SECONDS + 180))
+    while (( (remaining = deadline - SECONDS) > 0 )); do
+        if curl --fail --silent --max-time "$((remaining < 2 ? remaining : 2))" "http://127.0.0.1:$PORT/healthz" >/dev/null; then
+            (( SECONDS < deadline )) && return 0
+            break
         fi
-        [ "$attempt" -eq 30 ] || sleep 2
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        sleep "$((remaining < 2 ? remaining : 2))"
     done
     return 1
 }
@@ -342,14 +349,14 @@ configure_npm() {
                 return 1
             fi
         fi
-        if ! env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g "openclaw@$resolved" --ignore-scripts; then
+        if ! run_cmd env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g "openclaw@$resolved" --ignore-scripts; then
             echo -e "${RED}Error: Android may not support a required native dependency; use proot instead.${NC}" >&2
             return 1
         fi
         [ "$(package_version "$BASE_DIR")" = "$resolved" ] || {
             echo -e "${RED}Error: Installed package version does not match $resolved${NC}" >&2; return 1;
         }
-        (cd "$BASE_DIR" && npm run postinstall --if-present --ignore-scripts) || {
+        (cd "$BASE_DIR" && run_cmd npm run postinstall --if-present --ignore-scripts) || {
             echo -e "${RED}Error: OpenClaw postinstall failed; use proot if Android native features are unsupported.${NC}" >&2
             return 1
         }
@@ -484,6 +491,7 @@ export TERMUX_VERSION=1
 export TMPDIR=\$HOME/tmp
 export OPENCLAW_GATEWAY_TOKEN=$TOKEN
 export PATH=$NPM_BIN:\$PATH
+GATEWAY_PROCESS_PATTERN='$GATEWAY_PROCESS_PATTERN'
 ${AUTOSTART_BLOCK}
 
 # OpenClaw color definitions
@@ -497,29 +505,32 @@ NC='\033[0m'
 # OpenClaw service management functions
 ocr() {
     echo -e "\${YELLOW}Starting/restarting OpenClaw service...\${NC}"
-    pkill -9 -f 'openclaw' 2>/dev/null
+    pkill -9 -f "\$GATEWAY_PROCESS_PATTERN" 2>/dev/null
     tmux kill-session -t openclaw 2>/dev/null
     sleep 1
     tmux new -d -s openclaw || return 1
     sleep 1
-    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured" C-m || return 1
-    local attempt
-    for ((attempt=1; attempt<=30; attempt++)); do
-        if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null; then break; fi
-        [ "\$attempt" -eq 30 ] || sleep 2
+    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured 2>&1 | tee '$LOG_DIR/runtime.log'" C-m || return 1
+    local deadline remaining
+    deadline=\$((SECONDS + 180))
+    while (( (remaining = deadline - SECONDS) > 0 )); do
+        if curl --fail --silent --max-time "\$((remaining < 2 ? remaining : 2))" "http://127.0.0.1:$PORT/healthz" >/dev/null; then
+            (( SECONDS < deadline )) || break
+            echo ""
+            echo -e "\${GREEN}✅ Gateway /healthz ready (model function not verified)\${NC}"
+            echo "   1. Open in phone browser:: http://localhost:$PORT/?token=\$OPENCLAW_GATEWAY_TOKEN"
+            echo "   2. Or run command: openclaw tui"
+            echo "   3. Or use Telegram bot (if configured)"
+            echo ""
+            echo -e "\${BLUE}💡 oclog to view logs | ockill to stop service\${NC}"
+            return 0
+        fi
+        remaining=\$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        sleep "\$((remaining < 2 ? remaining : 2))"
     done
-    if [ "\$attempt" -le 30 ]; then
-        echo ""
-        echo -e "\${GREEN}✅ Gateway /healthz ready (model function not verified)\${NC}"
-        echo "   1. Open in phone browser:: http://localhost:$PORT/?token=\$OPENCLAW_GATEWAY_TOKEN"
-        echo "   2. Or run command: openclaw tui"
-        echo "   3. Or use Telegram bot (if configured)"
-        echo ""
-        echo -e "\${BLUE}💡 oclog to view logs | ockill to stop service\${NC}"
-    else
-        echo -e "\${RED}Gateway did not respond at HTTP /healthz in time; check oclog. Use proot if Android native features are unsupported.\${NC}"
-        return 1
-    fi
+    echo -e "\${RED}Gateway did not pass http://127.0.0.1:$PORT/healthz within 180 seconds; it may still be starting. Check oclog or $LOG_DIR/runtime.log. A timeout does not stop the Gateway.\${NC}" >&2
+    return 1
 }
 
 oclog() {
@@ -532,10 +543,10 @@ oclog() {
 
 ockill() {
     echo -e "\${YELLOW}Stopping OpenClaw service...\${NC}"
-    pkill -9 -f "openclaw" 2>/dev/null
+    pkill -9 -f "\$GATEWAY_PROCESS_PATTERN" 2>/dev/null
     tmux kill-session -t openclaw 2>/dev/null
     sleep 1
-    if ! tmux has-session -t openclaw 2>/dev/null && ! pgrep -f "openclaw" > /dev/null; then
+    if ! tmux has-session -t openclaw 2>/dev/null && ! pgrep -f "\$GATEWAY_PROCESS_PATTERN" > /dev/null; then
         echo -e "\${GREEN}✅ OpenClaw service stopped\${NC}"
     else
         echo -e "\${RED}❌ Failed to stop service, please check manually\${NC}"
@@ -571,7 +582,7 @@ start_service() {
     echo -e "${YELLOW}[5/6] Starting service...${NC}"
 
     # Check if there's an instance running
-    RUNNING_PROCESS=$(pgrep -f "openclaw gateway" 2>/dev/null || true)
+    RUNNING_PROCESS=$(pgrep -f "$GATEWAY_PROCESS_PATTERN" 2>/dev/null || true)
     HAS_TMUX_SESSION=$(tmux has-session -t openclaw 2>/dev/null && echo "yes" || echo "no")
 
     if [ -n "$RUNNING_PROCESS" ] || [ "$HAS_TMUX_SESSION" = "yes" ]; then
@@ -584,8 +595,8 @@ start_service() {
         if [ "$RESTART_CHOICE" = "y" ] || [ "$RESTART_CHOICE" = "Y" ]; then
             log "Stopping old instance"
             echo -e "${YELLOW}Stopping old instance...${NC}"
-            # Only stop openclaw related processes, don't kill all node processes
-            pkill -9 -f "openclaw" 2>/dev/null || true
+            # Only stop the managed Gateway launcher, not other OpenClaw or Node.js processes.
+            pkill -9 -f "$GATEWAY_PROCESS_PATTERN" 2>/dev/null || true
             tmux kill-session -t openclaw 2>/dev/null || true
             sleep 1
         else
@@ -593,7 +604,7 @@ start_service() {
                 echo -e "${GREEN}Existing Gateway HTTP /healthz ready (model function not verified)${NC}"
                 return 0
             fi
-            echo -e "${RED}Error: Existing Gateway did not respond at HTTP /healthz${NC}" >&2
+            echo -e "${RED}Error: Existing Gateway did not pass http://127.0.0.1:$PORT/healthz within 180 seconds; it may still be starting. Check $LOG_DIR/runtime.log. A timeout does not stop the Gateway.${NC}" >&2
             return 1
         fi
     fi
@@ -617,7 +628,7 @@ start_service() {
     if wait_for_gateway; then
         echo -e "${GREEN}[6/6] Gateway HTTP /healthz ready (model function not verified)${NC}"
     else
-        echo -e "${RED}Error: Gateway did not respond at HTTP /healthz in time; check $LOG_DIR/runtime.log. Use proot if Android native features are unsupported.${NC}" >&2
+        echo -e "${RED}Error: Gateway did not pass http://127.0.0.1:$PORT/healthz within 180 seconds; it may still be starting. Check $LOG_DIR/runtime.log. A timeout does not stop the Gateway.${NC}" >&2
         return 1
     fi
 }
@@ -629,7 +640,7 @@ uninstall_openclaw() {
 
     # Stop service
     echo -e "${YELLOW}Stopping service...${NC}"
-    run_cmd pkill -9 -f "openclaw" 2>/dev/null || true
+    run_cmd pkill -9 -f "$GATEWAY_PROCESS_PATTERN" 2>/dev/null || true
     run_cmd tmux kill-session -t openclaw 2>/dev/null || true
     log "Service stopped"
 
@@ -847,7 +858,7 @@ if [[ "$CONTINUE_ONBOARD" =~ ^[Yy]$ ]]; then
             log "Updated token in openclaw.json to environment variable reference"
             # Restart gateway to apply new token
             echo -e "${YELLOW}Restarting Gateway service to apply new Token...${NC}"
-            pkill -9 -f 'openclaw' 2>/dev/null || true
+            pkill -9 -f "$GATEWAY_PROCESS_PATTERN" 2>/dev/null || true
             tmux kill-session -t openclaw 2>/dev/null || true
             sleep 1
             tmux new -d -s openclaw
@@ -857,7 +868,7 @@ if [[ "$CONTINUE_ONBOARD" =~ ^[Yy]$ ]]; then
                 log "Gateway HTTP ready"
                 echo -e "${GREEN}Gateway /healthz ready (model function not verified)${NC}"
             else
-                echo -e "${RED}Error: Gateway did not respond at HTTP /healthz after restart. Check logs; use proot if Android native features are unsupported.${NC}" >&2
+                echo -e "${RED}Error: Gateway did not pass http://127.0.0.1:$PORT/healthz within 180 seconds after restart; it may still be starting. Check $LOG_DIR/runtime.log. A timeout does not stop the Gateway.${NC}" >&2
                 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 || return 1
             fi
         else

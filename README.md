@@ -142,10 +142,31 @@ curl --fail --silent --show-error http://127.0.0.1:18789/healthz
 | Node 版本不满足 `engines.node` | 原生环境更新 Termux 包列表和 Node 包；proot 更新其 nvm Node。重新检查完整版本，不要使用 `--force` 掩盖错误。 |
 | `EBADPLATFORM`、原生库加载或编译失败 | 保留错误信息，尝试 proot；不要手动写入空模块伪装修复。 |
 | 缺少官方启动文件或构建产物 | 重新安装对应的 npm 发布包；不要在不完整的全局包目录中尝试 `tsc` 构建。 |
-| Gateway 健康检查超时 | 查看 `~/openclaw-logs/runtime.log`、端口占用及 `openclaw doctor` 输出。服务不会因为 tmux 存在就被判为成功。 |
+| Gateway 健康检查超时 | 启动等待上限为 180 秒；查看 `~/openclaw-logs/runtime.log` 和实际端口。原生安装超时不会停止 Gateway，它可能仍在启动；不要因此反复重启。 |
 | 后台运行中断 | 关闭 Android 对 Termux 的电池优化，检查后台权限及唤醒锁。tmux 和唤醒锁不能保证系统永不杀进程。 |
 
 不要使用 `pkill -9 node`，它会杀死其他 Node 服务。`openclaw doctor` 可能提出配置修复，执行修复前备份状态目录。
+
+### 已显示 ready，但仍无法使用
+
+`[gateway] ready` 说明程序曾完成启动阶段，不代表页面、认证、模型和渠道全部正常。先在同一手机的新 Termux 会话中检查；改过端口时替换下面的 `18789`：
+
+```bash
+node --version
+openclaw --version
+curl -i --max-time 5 http://127.0.0.1:18789/healthz
+curl -I --max-time 5 http://127.0.0.1:18789/
+```
+
+说明故障发生在“安装器报失败”“网页无法打开”“网页打开但认证失败”还是“模型请求失败”，并提供对应输出。不要先卸载、删除状态目录或重复运行更新脚本，避免破坏现场。
+
+- `watcher using fallback polling ... every 30000 ms`：技能目录监听退回每 30 秒轮询。[上游仅在监听健康状态为 ready 时输出这条提示](https://github.com/openclaw/openclaw/blob/v2026.10.8/src/skills/runtime/refresh-observation-source.ts)，不能把它单独当作服务退出。`@openclaw/fs-safe@0.26.0` 未声明 Android 原生预编译包；补装 CMake/Go 不等于获得 Android 原生支持。
+- `fetch timeout ... clawhub.ai/v1/feeds/plugins`：插件目录网络请求超时。[上游支持缓存/内置目录回退](https://github.com/openclaw/openclaw/blob/v2026.10.8/src/plugins/official-external-plugin-catalog-hosted.ts)。这不证明模型请求正常，也不单独证明 Gateway 已停止。
+- npm 安装和包自身 postinstall 的标准输出及错误输出会同时显示并追加到原生 `~/openclaw-logs/install.log`（v2 为 `install-v2.log`），命令失败仍返回失败。旧脚本没有完整保存这些输出，过去那条错误可能无法从旧 `install.log` 恢复；npm 自己的日志位置可用 `npm config get cache` 查询，再检查其 `_logs` 子目录。
+
+诊断日志可能含 Token、API Key 和地址；只分享脱敏的错误片段。此修复已用隔离时钟验证 84 秒慢启动与 180 秒超时边界、真实 HTTP 响应、命令失败状态及日志保存，并验证进程匹配不会把文件名含 openclaw 的安装器当成 Gateway；不代表 Android 真机故障已全部解决。
+
+自动回归还覆盖真实 Node 进程改名为 `openclaw-gateway` 后的停止行为：只向测试创建的子进程发信号，确认安装器及其他 Node 服务存活。该组测试需要 POSIX `pkill` 和 Node；缺少时跳过，CLI 安全测试仍可运行。
 
 ## 备份与卸载
 

@@ -97,7 +97,8 @@ run_cmd() {
         echo "[DRY-RUN] $*"
         return 0
     fi
-    "$@"
+    "$@" 2>&1 | tee -a "$LOG_FILE"
+    return "${PIPESTATUS[0]}"
 }
 
 print_banner() {
@@ -269,7 +270,7 @@ render_openclaw_env_content() {
 }
 
 openclaw_gateway_process_pattern() {
-    printf '%s' "$OPENCLAW_BASE_DIR/openclaw.mjs gateway"
+    printf '%s' '^openclaw-gateway([[:space:]]|$)|^([^[:space:]]*/)?node[[:space:]]+[^[:space:]]*/\.npm-global/lib/node_modules/openclaw/(openclaw\.mjs|dist/entry\.js)[[:space:]]+gateway([[:space:]]|$)'
 }
 
 find_openclaw_gateway_processes() {
@@ -320,7 +321,7 @@ render_openclaw_runtime_functions() {
 
     cat <<EOF
 _openclaw_runtime_gateway_pattern() {
-    printf '%s' '$OPENCLAW_BASE_DIR/openclaw.mjs gateway'
+    printf '%s' '^openclaw-gateway([[:space:]]|$)|^([^[:space:]]*/)?node[[:space:]]+[^[:space:]]*/\.npm-global/lib/node_modules/openclaw/(openclaw\.mjs|dist/entry\.js)[[:space:]]+gateway([[:space:]]|$)'
 }
 
 _openclaw_runtime_stop_gateway_service() {
@@ -341,12 +342,16 @@ _openclaw_runtime_stop_gateway_service() {
 }
 
 _openclaw_runtime_wait_for_health() {
-    local attempt
-    for ((attempt=1; attempt<=30; attempt++)); do
-        if curl --fail --silent --max-time 2 "http://127.0.0.1:\${OPENCLAW_PORT:-$PORT}/healthz" >/dev/null; then
-            return 0
+    local deadline=\$((SECONDS + 180))
+    local remaining
+    while (( (remaining = deadline - SECONDS) > 0 )); do
+        if curl --fail --silent --max-time "\$((remaining < 2 ? remaining : 2))" "http://127.0.0.1:\${OPENCLAW_PORT:-$PORT}/healthz" >/dev/null; then
+            (( SECONDS < deadline )) && return 0
+            break
         fi
-        sleep 2
+        remaining=\$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        sleep "\$((remaining < 2 ? remaining : 2))"
     done
     return 1
 }
@@ -571,7 +576,7 @@ install_openclaw_package() {
         die "安装版本与目标不符：期望 ${install_version}，实际 $actual_version"
         return $?
     }
-    (cd "$OPENCLAW_BASE_DIR" && npm run postinstall --if-present --ignore-scripts) || {
+    (cd "$OPENCLAW_BASE_DIR" && run_cmd npm run postinstall --if-present --ignore-scripts) || {
         die "OpenClaw postinstall 失败；Android 原生依赖可能不兼容，请改用 proot Linux 环境"
         return $?
     }
@@ -1300,12 +1305,16 @@ setup_shell_integration() {
 }
 
 wait_for_gateway_health() {
-    local attempt
-    for ((attempt=1; attempt<=30; attempt++)); do
-        if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null; then
-            return 0
+    local deadline=$((SECONDS + 180))
+    local remaining
+    while (( (remaining = deadline - SECONDS) > 0 )); do
+        if curl --fail --silent --max-time "$((remaining < 2 ? remaining : 2))" "http://127.0.0.1:$PORT/healthz" >/dev/null; then
+            (( SECONDS < deadline )) && return 0
+            break
         fi
-        sleep 2
+        remaining=$((deadline - SECONDS))
+        (( remaining > 0 )) || break
+        sleep "$((remaining < 2 ? remaining : 2))"
     done
     return 1
 }

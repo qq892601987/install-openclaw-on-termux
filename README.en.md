@@ -142,10 +142,31 @@ Configure the model and channels, then complete a real model request. npm succes
 | Node does not satisfy `engines.node` | Update Termux's package list and Node package, or the nvm runtime inside Ubuntu. Recheck the complete range; do not hide the failure with `--force`. |
 | `EBADPLATFORM`, native-library load or build failure | Preserve the actual error and try proot. Do not write empty replacement modules. |
 | Missing official launcher or build output | Reinstall the npm release package. Do not try to compile an incomplete globally installed package with `tsc`. |
-| Gateway readiness timeout | Inspect `~/openclaw-logs/runtime.log`, port conflicts, and `openclaw doctor` output. A tmux session alone is not considered success. |
+| Gateway readiness timeout | Startup waits up to 180 seconds. Inspect `~/openclaw-logs/runtime.log` and the actual port. Native timeout does not stop Gateway; it may still be starting, so avoid repeatedly restarting it. |
 | Android stops background execution | Disable Termux battery optimization and check background permissions and wake lock. Neither tmux nor wake lock guarantees survival of Android process termination. |
 
 Do not use `pkill -9 node`: it kills unrelated Node services. Back up state before accepting configuration repairs proposed by Doctor.
+
+### Gateway reported ready but remains unusable
+
+`[gateway] ready` means the process reached its startup milestone, not that the UI, authentication, model, and channels all work. Check from another Termux session on the same phone; replace `18789` if configured differently:
+
+```bash
+node --version
+openclaw --version
+curl -i --max-time 5 http://127.0.0.1:18789/healthz
+curl -I --max-time 5 http://127.0.0.1:18789/
+```
+
+Specify whether the installer reports failure, the page cannot open, authentication fails, or a model request fails, and provide the relevant output. Do not uninstall, delete state, or repeatedly update before preserving the failure.
+
+- `watcher using fallback polling ... every 30000 ms`: skill-directory monitoring is using 30-second polling. [Upstream emits this message only for a ready watcher](https://github.com/openclaw/openclaw/blob/v2026.10.8/src/skills/runtime/refresh-observation-source.ts); it is not itself a process-exit report. `@openclaw/fs-safe@0.26.0` declares no Android native prebuild; installing CMake/Go does not establish Android native support.
+- `fetch timeout ... clawhub.ai/v1/feeds/plugins`: a plugin-catalog network request timed out. [Upstream supports snapshot/bundled fallback](https://github.com/openclaw/openclaw/blob/v2026.10.8/src/plugins/official-external-plugin-catalog-hosted.ts). This proves neither successful model calls nor a stopped Gateway.
+- npm install and package postinstall stdout/stderr now stream to the terminal and append to native `~/openclaw-logs/install.log` (`install-v2.log` for v2), preserving command failure status. Older installers did not save all output, so a past error may be unrecoverable there. Use `npm config get cache` to locate npm cache and inspect its `_logs` directory.
+
+Logs may contain tokens, API keys, and addresses; share only redacted error excerpts. Isolated-clock checks cover an 84-second startup and the 180-second deadline, with real HTTP responses, failing-command output/status, and process matching that excludes installers named openclaw. This does not establish that every reported Android failure is fixed.
+
+The automated regression also exercises a real Node process renamed to `openclaw-gateway`, restricting signals to fixture children and confirming installers and unrelated Node services survive. It requires POSIX `pkill` and Node and skips when unavailable; CLI safety tests still run.
 
 ## Backup and removal
 
