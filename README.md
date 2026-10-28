@@ -27,6 +27,18 @@
 
 请从可信来源安装最新 Termux（例如 F-Droid），准备稳定网络和足够的存储空间。依赖包、npm 下载及原生模块可能占用较多空间；旧版文档的“500MB 足够”不作为容量保证。
 
+### 默认系统依赖
+
+| 安装环境 | 显式安装的系统包 |
+| --- | --- |
+| 原生 Termux（三个原生脚本） | `nodejs-lts`、`git`、`openssh`、`tmux`、`termux-tools`、`curl` |
+| proot 的 Termux 外层 | `proot-distro`、`curl` |
+| proot 的 Ubuntu 内层 | `curl`、`build-essential`、`git`、`ca-certificates`、`python3` |
+
+原生安装不再强制安装 `cmake`、`python`、`golang`、`which`、`clang`、`ninja`、`pkg-config`、`build-essential` 和 `termux-api`。唤醒锁命令属于 [termux-tools](https://github.com/termux/termux-tools/blob/master/scripts/termux-wake-lock.in)，无需为唤醒锁安装 Termux:API。需要额外技能或设备 API 时，再按实际功能安装所需工具。
+
+proot 不再预装 `wget`、`nano`、`python3-pip`、`gnupg` 和 `lsb-release`，但保留基础编译工具与 Python，以支持正常 npm 生命周期中的原生模块编译后备。系统包管理器仍会安装这些包自身的传递依赖。本次仅精简安装清单，不卸载设备上已存在的软件包，也不修改 OpenClaw 发布包声明的 npm 依赖。
+
 ### 原生 Termux
 
 直接使用本仓库地址，避免短链接指向旧脚本：
@@ -153,6 +165,8 @@ bash install-openclaw-termux.sh --uninstall
 
 ### 2026-10-28：新版 OpenClaw 兼容性更新
 
+- 精简原生/Ubuntu 默认依赖，移除原生安装的旧 GYP 配置写入；按实际命令检测 OpenSSH 和唤醒锁，避免重复安装已存在的包。
+
 - 按所选 npm 发布版本检查完整 Node 版本范围，解析具体版本后安装。
 - 使用官方 `openclaw.mjs` 入口，安全替换命令包装器，避免写穿 npm 符号链接。
 - 移除把自动更新当作构建的步骤和不完整 npm 包的源码构建回退。
@@ -163,6 +177,8 @@ bash install-openclaw-termux.sh --uninstall
 ## 本地回归检查
 
 本次在 macOS arm64 / Node 26.12.1 上通过：四个脚本的语法检查、33 个 CLI 安全场景、实际 npm 指定版本安装与 postinstall、三个原生入口的包装器和 HTTP 就绪/超时路径。真实 OpenClaw 2026.10.8 Gateway 的 `/healthz` 返回 `{"ok":true,"status":"live"}`。服务管理命令在隔离环境中验证，未验证 Android 的 pkg、tmux、proot 或实际模型调用。
+
+依赖精简另在隔离的最小 PATH 下执行三个原生安装器的依赖检查：无编译工具、Python、Go、`which` 或 Termux:API 时均通过，且不触发补包；旧版同场景会误判缺包。v2 实际 npm/git 配置也通过，未创建 `.gyp`。
 
 ```bash
 python3 -m unittest discover -s tests -v

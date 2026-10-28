@@ -195,14 +195,19 @@ check_deps() {
         echo -e "${GREEN}包列表已是最新${NC}"
     fi
 
-    # curl 用于检测本地 Gateway 的 HTTP 就绪状态。
-    DEPS=("nodejs-lts" "git" "openssh" "tmux" "termux-api" "termux-tools" "curl" "cmake" "python" "golang" "which" "clang" "ninja" "pkg-config" "build-essential")
+    # 原生安装跳过依赖编译，仅安装运行与服务管理所需工具。
+    DEPS=("nodejs-lts" "git" "openssh" "tmux" "termux-tools" "curl")
     MISSING_DEPS=()
 
     for dep in "${DEPS[@]}"; do
-        cmd=$dep
-        if [ "$dep" = "nodejs-lts" ]; then cmd="node"; fi
-        if ! command -v "$cmd" &> /dev/null; then
+        case "$dep" in
+            nodejs-lts) cmd="node" ;;
+            openssh) cmd="sshd" ;;
+            termux-tools) cmd="termux-wake-lock" ;;
+            *) cmd="$dep" ;;
+        esac
+        if ! command -v "$cmd" &> /dev/null ||
+            { [ "$dep" = "nodejs-lts" ] && ! command -v npm &> /dev/null; }; then
             MISSING_DEPS+=("$dep")
         fi
     done
@@ -217,7 +222,7 @@ check_deps() {
             echo -e "${RED}错误：pkg 升级失败${NC}"
             exit 1
         fi
-        run_cmd pkg install ${MISSING_DEPS[*]} -y
+        run_cmd pkg install "${MISSING_DEPS[@]}" -y
         if [ $? -ne 0 ]; then
             log "依赖安装失败"
             echo -e "${RED}错误：依赖安装失败${NC}"
@@ -427,7 +432,7 @@ apply_patches() {
 
     # 修复硬编码的 /bin/npm 路径（Termux 下 npm 位于 $PREFIX/bin/npm）
     log "搜索并修复硬编码的 /bin/npm 路径"
-    REAL_NPM=$(which npm 2>/dev/null || echo "")
+    REAL_NPM=$(command -v npm 2>/dev/null || echo "")
     if [ -n "$REAL_NPM" ] && [ "$REAL_NPM" != "/bin/npm" ]; then
         FILES_WITH_NPM=$(grep -rl '"/bin/npm"' dist/ 2>/dev/null || true)
         if [ -z "$FILES_WITH_NPM" ]; then
@@ -563,7 +568,7 @@ activate_wakelock() {
         echo -e "${GREEN}✅ Wake-lock 已激活${NC}"
     else
         log "唤醒锁激活失败"
-        echo -e "${YELLOW}⚠️  Wake-lock 激活失败，可能 termux-api 未正确安装${NC}"
+        echo -e "${YELLOW}⚠️  Wake-lock 激活失败，请检查 termux-tools 和 Termux 后台权限${NC}"
     fi
 }
 

@@ -195,14 +195,19 @@ check_deps() {
         echo -e "${GREEN}Package list is up to date${NC}"
     fi
 
-    # curl checks the local Gateway HTTP health endpoint.
-    DEPS=("nodejs-lts" "git" "openssh" "tmux" "termux-api" "termux-tools" "curl" "cmake" "python" "golang" "which" "clang" "ninja" "pkg-config" "build-essential")
+    # Native installs skip dependency compilation; retain runtime/service tools only.
+    DEPS=("nodejs-lts" "git" "openssh" "tmux" "termux-tools" "curl")
     MISSING_DEPS=()
 
     for dep in "${DEPS[@]}"; do
-        cmd=$dep
-        if [ "$dep" = "nodejs-lts" ]; then cmd="node"; fi
-        if ! command -v "$cmd" &> /dev/null; then
+        case "$dep" in
+            nodejs-lts) cmd="node" ;;
+            openssh) cmd="sshd" ;;
+            termux-tools) cmd="termux-wake-lock" ;;
+            *) cmd="$dep" ;;
+        esac
+        if ! command -v "$cmd" &> /dev/null ||
+            { [ "$dep" = "nodejs-lts" ] && ! command -v npm &> /dev/null; }; then
             MISSING_DEPS+=("$dep")
         fi
     done
@@ -217,7 +222,7 @@ check_deps() {
             echo -e "${RED}Error: pkg upgrade failed${NC}"
             exit 1
         fi
-        run_cmd pkg install ${MISSING_DEPS[*]} -y
+        run_cmd pkg install "${MISSING_DEPS[@]}" -y
         if [ $? -ne 0 ]; then
             log "Dependency installation failed"
             echo -e "${RED}Error: Dependency installation failed${NC}"
@@ -422,7 +427,7 @@ apply_patches() {
 
     # Fix hardcoded /bin/npm path (in Termux, npm is located at $PREFIX/bin/npm)
     log "Searching and fixing hardcoded /bin/npm paths"
-    REAL_NPM=$(which npm 2>/dev/null || echo "")
+    REAL_NPM=$(command -v npm 2>/dev/null || echo "")
     if [ -n "$REAL_NPM" ] && [ "$REAL_NPM" != "/bin/npm" ]; then
         FILES_WITH_NPM=$(grep -rl '"/bin/npm"' dist/ 2>/dev/null || true)
         if [ -z "$FILES_WITH_NPM" ]; then
@@ -557,7 +562,7 @@ activate_wakelock() {
         echo -e "${GREEN}✅ Wake-lock activated${NC}"
     else
         log "Wake lock activation failed"
-        echo -e "${YELLOW}⚠️  Wake-lock activation failed, termux-api may not be installed correctly${NC}"
+        echo -e "${YELLOW}⚠️  Wake-lock activation failed; check termux-tools and Termux background permissions${NC}"
     fi
 }
 
