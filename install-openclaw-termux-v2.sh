@@ -769,20 +769,11 @@ EOF
 check_dependency_available() {
     local dep="$1"
     case "$dep" in
-        nodejs-lts) command -v node >/dev/null 2>&1 ;;
+        nodejs-lts) command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 ;;
         git) command -v git >/dev/null 2>&1 ;;
-        openssh) command -v ssh >/dev/null 2>&1 ;;
+        openssh) command -v sshd >/dev/null 2>&1 ;;
         tmux) command -v tmux >/dev/null 2>&1 ;;
-        termux-api) command -v termux-wake-lock >/dev/null 2>&1 ;;
-        termux-tools) command -v pkg >/dev/null 2>&1 ;;
-        cmake) command -v cmake >/dev/null 2>&1 ;;
-        python) command -v python >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 ;;
-        golang) command -v go >/dev/null 2>&1 ;;
-        which) command -v which >/dev/null 2>&1 ;;
-        clang) command -v clang >/dev/null 2>&1 ;;
-        ninja) command -v ninja >/dev/null 2>&1 ;;
-        pkg-config) command -v pkg-config >/dev/null 2>&1 ;;
-        build-essential) command -v make >/dev/null 2>&1 ;;
+        termux-tools) command -v termux-wake-lock >/dev/null 2>&1 ;;
         *) command -v "$dep" >/dev/null 2>&1 ;;
     esac
 }
@@ -819,7 +810,7 @@ maybe_refresh_pkg_index() {
 }
 
 maybe_install_missing_dependencies() {
-    local deps=("nodejs-lts" "git" "openssh" "tmux" "curl" "termux-api" "termux-tools" "cmake" "python" "golang" "which" "clang" "ninja" "pkg-config" "build-essential")
+    local deps=("nodejs-lts" "git" "openssh" "tmux" "curl" "termux-tools")
     local missing_deps=()
     local dep
 
@@ -1133,7 +1124,7 @@ check_deps() {
 }
 
 configure_npm() {
-    warn "[2/5] 正在配置 NPM 与构建环境..."
+    warn "[2/5] 正在配置 NPM 与临时目录..."
     require_termux_runtime || return $?
 
     if ! is_termux_environment && [ "$DRY_RUN" -eq 1 ]; then
@@ -1141,8 +1132,8 @@ configure_npm() {
         return 0
     fi
 
-    run_cmd mkdir -p "$NPM_GLOBAL" "$TMP_DIR" "$HOME/.gyp" || {
-        die "无法创建 NPM/临时/GYP 目录"
+    run_cmd mkdir -p "$NPM_GLOBAL" "$TMP_DIR" || {
+        die "无法创建 NPM/临时目录"
         return $?
     }
 
@@ -1164,12 +1155,8 @@ configure_npm() {
         warn "git scp-style ssh->https 映射配置失败（可稍后手动处理）"
     }
 
-    write_text_file "$HOME/.gyp/include.gypi" "{'variables':{'android_ndk_path':''}}" || {
-        die "写入 GYP 配置失败"
-        return $?
-    }
 
-    success "✅ NPM/TMPDIR/GYP 基础环境已配置到当前会话"
+    success "✅ NPM/TMPDIR 基础环境已配置到当前会话"
 }
 
 install_or_update_openclaw() {

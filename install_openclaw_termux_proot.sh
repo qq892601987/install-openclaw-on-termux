@@ -66,7 +66,7 @@ dpkg --force-confdef --force-confold --configure -a
 termux_apt_noninteractive update
 # 避免在 `curl | bash` 过程中升级当前正在运行的 bash，
 # 这会触发 bash.bashrc 交互式 conffile 提示，并可能打断后续脚本执行。
-termux_apt_noninteractive install -y proot-distro git curl wget nano
+termux_apt_noninteractive install -y proot-distro curl
 
 # 2. 安装 Ubuntu（自动决定可用发行版，不要求用户选择版本）
 echo "2. 安装并准备 proot-distro 的 Ubuntu"
@@ -233,8 +233,8 @@ fi
 rm -f "$FINAL_APT_UPDATE_LOG"
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 
-# 4. 安装构建与运行时依赖（nvm/node 编译需要）
-DEBIAN_FRONTEND=noninteractive apt-get install -y curl build-essential git wget nano ca-certificates python3 python3-pip gnupg lsb-release
+# 4. 保留 npm 原生模块的编译后备；不预装编辑器和无关 Python 工具。
+DEBIAN_FRONTEND=noninteractive apt-get install -y curl build-essential git ca-certificates python3
 
 # 5. 在 Ubuntu proot 内安装所选 Node.js LTS（默认 24）
 export NVM_DIR="$HOME/.nvm"

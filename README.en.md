@@ -27,6 +27,18 @@ This update targets the published contract of OpenClaw **2026.10.8**. **Android/
 
 Use a current Termux from a trusted source such as F-Droid. Allow sufficient storage and a stable network: dependencies, npm downloads, and native modules may consume substantial space. The former 500MB estimate is not a capacity guarantee.
 
+### Default system dependencies
+
+| Installation environment | Explicitly installed system packages |
+| --- | --- |
+| Native Termux (all three native scripts) | `nodejs-lts`, `git`, `openssh`, `tmux`, `termux-tools`, `curl` |
+| Termux outside proot | `proot-distro`, `curl` |
+| Ubuntu inside proot | `curl`, `build-essential`, `git`, `ca-certificates`, `python3` |
+
+Native installation no longer forces `cmake`, `python`, `golang`, `which`, `clang`, `ninja`, `pkg-config`, `build-essential`, or `termux-api`. The wake-lock command belongs to [termux-tools](https://github.com/termux/termux-tools/blob/master/scripts/termux-wake-lock.in); it does not require Termux:API. Install extra skill or device-API dependencies only when needed.
+
+The proot path no longer preinstalls `wget`, `nano`, `python3-pip`, `gnupg`, or `lsb-release`. It retains basic build tools and Python for native-module build fallback during the normal npm lifecycle. Package managers still install transitive dependencies of these system packages. This cleanup does not uninstall software already on your device or alter npm dependencies declared by the OpenClaw release.
+
 ### Native Termux
 
 Use the repository URL directly rather than a short URL that might serve an older script:
@@ -153,6 +165,8 @@ The legacy native uninstall flow removes `~/.npm-global`, which may contain othe
 
 ### 2026-10-28: Modern OpenClaw compatibility
 
+- Trim native/Ubuntu package lists and remove legacy native GYP configuration writes; detect OpenSSH and wake lock by their actual commands to avoid reinstalling available packages.
+
 - Validate the selected release's full Node engine range and resolve versions before installation.
 - Use the official `openclaw.mjs` launcher and replace wrappers without writing through npm symlinks.
 - Remove the automatic updater-as-build step and incomplete-package source-build fallbacks.
@@ -163,6 +177,8 @@ The legacy native uninstall flow removes `~/.npm-global`, which may contain othe
 ## Local regression checks
 
 Verified locally on macOS arm64 / Node 26.12.1: syntax for all four scripts, 33 CLI safety scenarios, actual pinned npm installation and postinstall, and wrapper plus HTTP readiness/timeout paths for all three native entrypoints. A real OpenClaw 2026.10.8 Gateway returned `{"ok":true,"status":"live"}` at `/healthz`. Service-management commands were isolated; Android pkg, tmux, proot, and actual model calls were not exercised.
+
+Dependency cleanup was also exercised with an isolated minimal PATH: all three native dependency checks passed without compilers, Python, Go, `which`, or Termux:API and did not request package installation; the previous installer incorrectly requested packages in the same scenario. Actual v2 npm/git configuration also completed without creating `.gyp`.
 
 ```bash
 python3 -m unittest discover -s tests -v
