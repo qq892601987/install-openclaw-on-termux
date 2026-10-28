@@ -470,15 +470,20 @@ if [[ "$START_ONBOARD" =~ ^[Yy]$ ]]; then
       GATEWAY_PID=$!
       trap 'kill "$GATEWAY_PID" 2>/dev/null || true' INT TERM
       GATEWAY_READY=0
-      for ((attempt=1; attempt<=30; attempt++)); do
-        if curl --fail --silent --max-time 2 "http://127.0.0.1:$GATEWAY_PORT/healthz" > /dev/null; then
-          GATEWAY_READY=1
+      GATEWAY_DEADLINE=$((SECONDS + 180))
+      while (( (remaining = GATEWAY_DEADLINE - SECONDS) > 0 )); do
+        if curl --fail --silent --max-time "$((remaining < 2 ? remaining : 2))" "http://127.0.0.1:$GATEWAY_PORT/healthz" > /dev/null; then
+          if (( SECONDS < GATEWAY_DEADLINE )); then
+            GATEWAY_READY=1
+          fi
           break
         fi
         if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
           break
         fi
-        sleep 2
+        remaining=$((GATEWAY_DEADLINE - SECONDS))
+        (( remaining > 0 )) || break
+        sleep "$((remaining < 2 ? remaining : 2))"
       done
       if [ "$GATEWAY_READY" -ne 1 ]; then
         echo "错误：Gateway 未在预期时间内通过 127.0.0.1:$GATEWAY_PORT/healthz 健康检查。" >&2
