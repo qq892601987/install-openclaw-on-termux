@@ -1,6 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REQUESTED_VERSION="latest"
+OPENCLAW_VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+NODE_SELECTOR_PATTERN='^[0-9]+(\.[0-9]+){0,2}$'
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --version|-V)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "用法: $0 [--version|-V 版本号]" >&2
+        exit 1
+      fi
+      if [[ ! "$2" =~ $OPENCLAW_VERSION_PATTERN ]]; then
+        echo "错误：--version 必须是完整 npm 版本号，例如 2026.10.8。" >&2
+        exit 1
+      fi
+      REQUESTED_VERSION="$2"
+      shift 2
+      ;;
+    --help|-h)
+      echo "用法: $0 [--version|-V 版本号]"
+      echo "默认安装 npm 最新版；指定版本时须使用完整版本号。可设置 OPENCLAW_NODE_VERSION 选择 Ubuntu proot 内的 Node.js LTS（默认 24）。"
+      exit 0
+      ;;
+    *)
+      echo "未知参数: $1；用法: $0 [--version|-V 版本号]" >&2
+      exit 1
+      ;;
+  esac
+done
+OPENCLAW_NODE_VERSION="${OPENCLAW_NODE_VERSION:-24}"
+if [[ ! "$OPENCLAW_NODE_VERSION" =~ $NODE_SELECTOR_PATTERN ]]; then
+  echo "错误：OPENCLAW_NODE_VERSION 必须是 Node.js LTS 数字版本，例如 24 或 26.12.1。" >&2
+  exit 1
+fi
+NODE_MAJOR="${OPENCLAW_NODE_VERSION%%.*}"
+if (( 10#$NODE_MAJOR < 24 || 10#$NODE_MAJOR % 2 != 0 )); then
+  echo "错误：OPENCLAW_NODE_VERSION 须选择 24 或更新的偶数版 Node.js LTS。" >&2
+  exit 1
+fi
+if [ -z "${PREFIX:-}" ] || [ ! -x "$PREFIX/bin/pkg" ]; then
+  echo "错误：请在原生 Termux 中运行此脚本（需要有效的 PREFIX/bin/pkg）；不要在 Ubuntu proot 或普通 Linux/macOS 中运行。" >&2
+  exit 1
+fi
+
 LOGFILE="$HOME/deploy_openclaw_proot.log"
 exec > >(tee -a "$LOGFILE") 2>&1
 
@@ -80,8 +123,10 @@ else
 fi
 
 # 3. 进入 Ubuntu 并执行后续命令（在 proot 内部执行）
-OPENCLAW_TERMUX_DISTRO="$DISTRO" proot-distro login "$DISTRO" -- bash -s <<'PROOT_BASH'
+OPENCLAW_TERMUX_DISTRO="$DISTRO" proot-distro login "$DISTRO" -- bash -s -- "$REQUESTED_VERSION" "$OPENCLAW_NODE_VERSION" <<'PROOT_BASH'
 set -euo pipefail
+REQUESTED_VERSION="$1"
+NODE_SELECTOR="$2"
 echo "进入 proot-distro: $(date)"
 
 GREEN='\033[0;32m'
@@ -191,7 +236,7 @@ DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 # 4. 安装构建与运行时依赖（nvm/node 编译需要）
 DEBIAN_FRONTEND=noninteractive apt-get install -y curl build-essential git wget nano ca-certificates python3 python3-pip gnupg lsb-release
 
-# 5. 安装 nvm 并切换 Node.js 22.x
+# 5. 在 Ubuntu proot 内安装所选 Node.js LTS（默认 24）
 export NVM_DIR="$HOME/.nvm"
 install_nvm() {
   echo "安装/重装 nvm..."
@@ -213,10 +258,49 @@ if ! load_nvm; then
   load_nvm || { echo "错误：nvm 安装/加载失败，nvm 仍不可用"; exit 1; }
 fi
 
-# 安装 Node 22（安装最新 22.x）
-nvm install 22
-nvm alias default 22
-nvm use 22
+# OpenClaw 新版要求较新的 Node；具体要求还须按目标包元数据核对。
+if ! nvm install "$NODE_SELECTOR" || ! nvm use "$NODE_SELECTOR"; then
+  echo "错误：Ubuntu proot 内无法安装 Node.js ${NODE_SELECTOR}。请检查架构、网络与 nvm 输出；可设 OPENCLAW_NODE_VERSION 为符合目标版本要求的 LTS 版本，勿在原生 Termux 内安装 Linux nvm。" >&2
+  exit 1
+fi
+nvm alias default "$NODE_SELECTOR"
+NODE_VERSION="$(node --version)"
+if [ -z "$NODE_VERSION" ] || ! command -v npm >/dev/null 2>&1; then
+  echo "错误：Ubuntu proot 内缺少可用的 Node.js/npm，请检查 nvm 安装。" >&2
+  exit 1
+fi
+if ! TARGET_VERSION="$(npm view "openclaw@$REQUESTED_VERSION" version 2>/dev/null)" || [ -z "$TARGET_VERSION" ]; then
+  echo "错误：无法从 npm 查询 openclaw@$REQUESTED_VERSION 的具体版本；请检查网络和版本号。" >&2
+  exit 1
+fi
+if [[ ! "$TARGET_VERSION" =~ $OPENCLAW_VERSION_PATTERN ]] ||
+   { [ "$REQUESTED_VERSION" != latest ] && [ "$TARGET_VERSION" != "$REQUESTED_VERSION" ]; }; then
+  echo "错误：npm 返回的 OpenClaw 版本无效或与指定版本不符: $TARGET_VERSION" >&2
+  exit 1
+fi
+if ! ENGINE_RANGE="$(npm view "openclaw@$TARGET_VERSION" engines.node 2>/dev/null)" || [ -z "$ENGINE_RANGE" ]; then
+  echo "错误：无法读取 openclaw@$TARGET_VERSION 的 engines.node 要求，停止安装。" >&2
+  exit 1
+fi
+if ! npm exec --yes --package=semver@7 -- semver -r "$ENGINE_RANGE" "$NODE_VERSION" >/dev/null; then
+  echo "错误：Node $NODE_VERSION 不满足 openclaw@$TARGET_VERSION 的要求 ($ENGINE_RANGE)，或无法验证版本。请设置 OPENCLAW_NODE_VERSION 为符合要求的 Ubuntu proot 内 Node.js LTS 版本后重试。" >&2
+  exit 1
+fi
+echo "安装 openclaw@${TARGET_VERSION}（Node ${NODE_VERSION}，要求 ${ENGINE_RANGE}）"
+# 仅清理本脚本曾写入的 proot 包装器，避免 npm 安装时 EEXIST；
+# 旧版包装器没有标记时须同时识别其 shim 和指向 openclaw 的 exec。
+is_managed_proot_wrapper() {
+  local file="$1"
+  [ -f "$file" ] && [ ! -L "$file" ] &&
+    [ "$(IFS= read -r first_line < "$file"; printf '%s' "$first_line")" = '#!/usr/bin/env bash' ] &&
+    { grep -q 'OPENCLAW_PROOT_WRAPPER' "$file" ||
+      { grep -Fq '/.openclaw/hijack.js' "$file" &&
+        grep -Eq '^exec "[^"]*openclaw(\.proot-real|\.mjs)?" "\$@"$' "$file"; }; }
+}
+EXISTING_OPENCLAW_BIN="$(dirname "$(command -v node)")/openclaw"
+if is_managed_proot_wrapper "$EXISTING_OPENCLAW_BIN"; then
+  rm -f "$EXISTING_OPENCLAW_BIN"
+fi
 NODE_EXE="$(command -v node)"
 NODE_BIN_DIR="$(dirname "$(command -v node)")"
 
@@ -236,7 +320,10 @@ chmod 644 /etc/profile.d/openclaw-nvm.sh
 
 # 6. 安装 OpenClaw（全局）
 npm config set fund false
-npm install -g openclaw
+if ! npm install -g "openclaw@$TARGET_VERSION"; then
+  echo "错误：openclaw@$TARGET_VERSION 安装失败；请检查 npm 输出及 Ubuntu proot 的平台依赖。" >&2
+  exit 1
+fi
 
 # 7. 创建 hijack.js 脚本（确保目录存在）
 mkdir -p "$HOME/.openclaw"
@@ -276,30 +363,25 @@ if (typeof Module.syncBuiltinESMExports === 'function') {
 }
 OPENCLAW_HIJACK_JS_EOF
 
-# 8. 查找 openclaw 可执行路径并包装命令
-OPENCLAW_BIN="$(command -v openclaw || true)"
-if [ -z "$OPENCLAW_BIN" ]; then
-  # 尝试 npm 全局 bin 路径
-  NPM_BIN_DIR="$(npm bin -g 2>/dev/null || echo "$HOME/.nvm/versions/node/$(node -v)/bin")"
-  OPENCLAW_BIN="$NPM_BIN_DIR/openclaw"
-fi
-if [ ! -x "$OPENCLAW_BIN" ] && [ ! -f "$OPENCLAW_BIN" ]; then
-  echo "错误：找不到 openclaw 可执行文件，安装可能失败。"
-  echo "已搜索路径: $OPENCLAW_BIN"
+# 8. 使用 npm 包的官方入口包装命令，仅保留 proot 网络接口兼容 shim
+PACKAGE_PATH="$(npm root -g)/openclaw"
+REAL_OPENCLAW_BIN="$PACKAGE_PATH/openclaw.mjs"
+OPENCLAW_BIN="$NODE_BIN_DIR/openclaw"
+if [ ! -f "$REAL_OPENCLAW_BIN" ]; then
+  echo "错误：npm 包缺少官方入口 ${REAL_OPENCLAW_BIN}，安装不完整。" >&2
   exit 1
 fi
-echo "找到 openclaw: $OPENCLAW_BIN"
-
-# 8.1 包装 openclaw 命令，确保所有 CLI 子命令都自动加载 proot shim
+INSTALLED_VERSION="$(node -p 'require(process.argv[1]).version' "$PACKAGE_PATH/package.json")"
+if [ "$INSTALLED_VERSION" != "$TARGET_VERSION" ]; then
+  echo "错误：安装版本 $INSTALLED_VERSION 与目标版本 $TARGET_VERSION 不符。" >&2
+  exit 1
+fi
 if [ -L "$OPENCLAW_BIN" ]; then
-  REAL_OPENCLAW_BIN="$(readlink -f "$OPENCLAW_BIN")"
+  # npm 的命令是指向包入口的符号链接，写包装器之前必须移除链接。
   rm -f "$OPENCLAW_BIN"
-else
-  REAL_OPENCLAW_BIN="${OPENCLAW_BIN}.proot-real"
-  if ! grep -q 'OPENCLAW_PROOT_WRAPPER' "$OPENCLAW_BIN" 2>/dev/null; then
-    rm -f "$REAL_OPENCLAW_BIN"
-    mv "$OPENCLAW_BIN" "$REAL_OPENCLAW_BIN"
-  fi
+elif [ -e "$OPENCLAW_BIN" ] && ! is_managed_proot_wrapper "$OPENCLAW_BIN"; then
+  echo "错误：$OPENCLAW_BIN 已存在且并非本脚本包装器，拒绝覆盖。" >&2
+  exit 1
 fi
 cat > "$OPENCLAW_BIN" <<OPENCLAW_WRAPPER_EOF
 #!/usr/bin/env bash
@@ -311,6 +393,14 @@ OPENCLAW_WRAPPER_EOF
 chmod +x "$OPENCLAW_BIN"
 mkdir -p /usr/local/bin
 ln -sf "$OPENCLAW_BIN" /usr/local/bin/openclaw
+if ! CLI_VERSION="$(openclaw --version)"; then
+  echo "错误：openclaw --version 无法运行；请检查 proot 内的 Node 和 npm 依赖。" >&2
+  exit 1
+fi
+case "$CLI_VERSION" in
+  *"$TARGET_VERSION"*) echo "OpenClaw 命令版本: $CLI_VERSION" ;;
+  *) echo "错误：openclaw --version 返回 ${CLI_VERSION}，预期 ${TARGET_VERSION}。" >&2; exit 1 ;;
+esac
 
 is_openclaw_config_ready() {
   [ -f "$HOME/.openclaw/openclaw.json" ] || return 1
@@ -369,14 +459,41 @@ if [[ "$START_ONBOARD" =~ ^[Yy]$ ]]; then
 
     if [[ "$START_GATEWAY" =~ ^[Yy]$ ]]; then
       echo
-      echo -e "${YELLOW}正在启动 openclaw gateway（前台运行，按 Ctrl+C 可退出）...${NC}"
+      echo -e "${YELLOW}正在启动 openclaw gateway（按 Ctrl+C 可退出）...${NC}"
+      echo "HTTP 健康检查只验证 Gateway 响应，不保证模型调用可用。"
       echo
-      if openclaw gateway < /dev/tty > /dev/tty 2>&1; then
+      GATEWAY_PORT="$(node -e 'const c=require(process.argv[1]); const p=c.gateway?.port ?? 18789; if (!Number.isInteger(p) || p<1 || p>65535) process.exit(1); console.log(p)' "$HOME/.openclaw/openclaw.json")" || {
+        echo "错误：Gateway 配置端口无效。" >&2
+        exit 1
+      }
+      openclaw gateway < /dev/null > /dev/tty 2>&1 &
+      GATEWAY_PID=$!
+      trap 'kill "$GATEWAY_PID" 2>/dev/null || true' INT TERM
+      GATEWAY_READY=0
+      for ((attempt=1; attempt<=30; attempt++)); do
+        if curl --fail --silent --max-time 2 "http://127.0.0.1:$GATEWAY_PORT/healthz" > /dev/null; then
+          GATEWAY_READY=1
+          break
+        fi
+        if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
+          break
+        fi
+        sleep 2
+      done
+      if [ "$GATEWAY_READY" -ne 1 ]; then
+        echo "错误：Gateway 未在预期时间内通过 127.0.0.1:$GATEWAY_PORT/healthz 健康检查。" >&2
+        kill "$GATEWAY_PID" 2>/dev/null || true
+        wait "$GATEWAY_PID" || true
+        exit 1
+      fi
+      echo "Gateway HTTP 健康检查通过；不代表模型功能已验证。"
+      if wait "$GATEWAY_PID"; then
         :
       else
         echo
         echo -e "${YELLOW}OpenClaw gateway 已退出。${NC}"
       fi
+      trap - INT TERM
     fi
 
     show_resume_tip "configured"

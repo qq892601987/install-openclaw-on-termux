@@ -31,7 +31,6 @@
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     _NEED_PROMPT=1
 fi
-trap 'if [ "$_NEED_PROMPT" = "1" ]; then echo ""; echo "Warning: Please run the following command to make aliases (ocr-restart, ockill-force stop, oclog-view logs) effective:"; echo "   source ~/.bashrc"; fi' EXIT
 
 # Parse command line options
 VERBOSE=0
@@ -58,10 +57,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --version|-V)
-            TARGET_VERSION="$2"
-            if [ -z "$TARGET_VERSION" ]; then
-                echo "Error: --version requires a version number"
-                echo "Usage: $0 --version <version>"
+            TARGET_VERSION="${2:-}"
+            if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+                echo "Error: --version requires an exact version (e.g. 2026.10.8)" >&2
                 exit 1
             fi
             shift 2
@@ -86,6 +84,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+if [ "$DRY_RUN" -eq 0 ] && [ "$_NEED_PROMPT" = 1 ]; then
+    trap 'echo ""; echo "Run source ~/.bashrc to enable ocr/ockill/oclog"' EXIT
+fi
 
 trap 'echo -e "${RED}Error: Script execution failed, please check the output above${NC}"' ERR
 
@@ -123,13 +124,29 @@ NPM_GLOBAL="$HOME/.npm-global"
 NPM_BIN="$NPM_GLOBAL/bin"
 LOG_DIR="$HOME/openclaw-logs"
 LOG_FILE="$LOG_DIR/install.log"
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[DRY-RUN] No HOME, npm package, configuration or service changes; target: ${TARGET_VERSION:-latest (resolved and pinned once during installation)}"
+    if [ "$UNINSTALL" -eq 1 ]; then
+        echo "[DRY-RUN] Would uninstall OpenClaw and remove configuration"
+    else
+        echo "[DRY-RUN] Would fetch the concrete npm version and engines.node, validate the full Node.js version"
+        echo "[DRY-RUN] If replacement is needed: npm i -g openclaw@<resolved-version> --ignore-scripts"
+        echo "[DRY-RUN] Would run npm run postinstall --if-present --ignore-scripts in package directory, create safe wrapper, check Gateway /healthz"
+    fi
+    [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 0 || return 0
+fi
 
-# Create log directory (prevent log function from erroring when directory doesn't exist)
-mkdir -p "$LOG_DIR" 2>/dev/null || true
+if [ -z "${PREFIX:-}" ] || [ ! -x "$PREFIX/bin/pkg" ]; then
+    echo "Error: Run this installer inside native Termux; --help and --dry-run are available elsewhere." >&2
+    [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 || return 1
+fi
+
+# Create logs only during an actual installation, never during dry run.
+if [ "$DRY_RUN" -eq 0 ]; then mkdir -p "$LOG_DIR"; fi
 
 # Log function
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"
+    if [ "$DRY_RUN" -eq 0 ]; then echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"; fi
 }
 
 # Command execution function (supports dry-run)
@@ -148,37 +165,6 @@ run_cmd() {
 
 # Function definitions
 
-apply_koffi_stub() {
-    # Apply koffi stub for Termux compatibility (android-arm64)
-    # koffi is only used by pi-tui for Windows VT input, which never executes on Android
-    log "Applying koffi stub"
-    echo -e "${YELLOW}[2.5/6] Applying koffi compatibility fix...${NC}"
-    
-    KOFFI_DIR="$NPM_GLOBAL/lib/node_modules/openclaw/node_modules/koffi"
-    
-    if [ -d "$KOFFI_DIR" ]; then
-        cat > "$KOFFI_DIR/index.js" << 'EOF'
-// Koffi stub for android-arm64 — native module not available on this platform.
-// koffi is only used by pi-tui for Windows VT input (enableWindowsVTInput),
-// which is guarded by process.platform !== "win32" and never executes here.
-const handler = {
-  get(_, prop) {
-    if (prop === '__esModule') return false;
-    if (prop === 'default') return proxy;
-    if (prop === 'then') return undefined;
-    return function() { throw new Error('koffi stub: not available on android-arm64'); };
-  }
-};
-const proxy = new Proxy({}, handler);
-module.exports = proxy;
-module.exports.default = proxy;
-EOF
-        log "koffi stub applied successfully"
-        echo -e "${GREEN}koffi stub applied successfully${NC}"
-    else
-        log "koffi directory not found, skipping stub"
-    fi
-}
 
 check_deps() {
     # Check and install basic dependencies
@@ -209,8 +195,8 @@ check_deps() {
         echo -e "${GREEN}Package list is up to date${NC}"
     fi
 
-    # Define required basic packages (includes build tools for native module compilation)
-    DEPS=("nodejs-lts" "git" "openssh" "tmux" "termux-api" "termux-tools" "cmake" "python" "golang" "which" "clang" "ninja" "pkg-config" "build-essential")
+    # curl checks the local Gateway HTTP health endpoint.
+    DEPS=("nodejs-lts" "git" "openssh" "tmux" "termux-api" "termux-tools" "curl" "cmake" "python" "golang" "which" "clang" "ninja" "pkg-config" "build-essential")
     MISSING_DEPS=()
 
     for dep in "${DEPS[@]}"; do
@@ -248,289 +234,148 @@ check_deps() {
     echo -e "${BLUE}Node.js version: $(node -v)${NC}"
     echo -e "${BLUE}NPM version: $(npm -v)${NC}" 
 
-    # Check Node.js version (must be 22 or higher)
-    NODE_VERSION=$(node --version 2>/dev/null | sed 's/v//' | cut -d. -f1)
-    if [ -z "$NODE_VERSION" ] || [ "$NODE_VERSION" -lt 22 ]; then
-        log "Node.js version check failed: $NODE_VERSION"
-        echo -e "${RED}Error: Node.js version must be 22 or higher, current version: $(node --version 2>/dev/null || echo 'unknown')${NC}"
-        exit 1
+    # The precise runtime requirement comes from the selected package engines.node metadata.
+    command -v npm >/dev/null || { echo -e "${RED}Error: npm unavailable${NC}"; exit 1; }
+}
+
+package_version() {
+    node -p "require(process.argv[1]).version" "$1/package.json" 2>/dev/null
+}
+
+check_engine() {
+    local version="$1" range="$2" runtime
+    runtime=$(node -p 'process.version.slice(1)' 2>/dev/null) || return 1
+    if [ -z "$range" ] || [ "$range" = "undefined" ] ||
+       ! npm exec --yes --package=semver@7 -- semver -r "$range" "$runtime" >/dev/null 2>&1; then
+        echo -e "${RED}Error: OpenClaw $version requires Node.js $range; current runtime is $runtime (or validation failed). Install a compatible Node.js; use proot if Android native modules are unsupported.${NC}" >&2
+        return 1
     fi
-    
-    # Warning: If using Node.js 25 (non-LTS), warn about potential compatibility issues and offer downgrade option
-    if [ "$NODE_VERSION" -eq 25 ]; then
-        log "Warning: Node.js 25 (non-LTS version) detected"
-        echo -e "${YELLOW}⚠️  Warning: You are using Node.js 25 (Current version), which may encounter native module compatibility issues${NC}"
-        echo -e "${YELLOW}    It is recommended to downgrade to Node.js 24 LTS for better stability${NC}"
-        echo ""
-        read -p "Downgrade to Node.js 24 LTS? (y/n) [default: y]: " DOWNGRADE_CHOICE
-        DOWNGRADE_CHOICE=${DOWNGRADE_CHOICE:-y}
-        
-        if [ "$DOWNGRADE_CHOICE" = "y" ] || [ "$DOWNGRADE_CHOICE" = "Y" ]; then
-            log "Starting Node.js downgrade to LTS version"
-            echo -e "${YELLOW}Downgrading Node.js to 24 LTS...${NC}"
-            
-            # Uninstall current Node.js version first
-            run_cmd pkg uninstall nodejs -y
-            if [ $? -ne 0 ]; then
-                log "Node.js uninstall failed"
-                echo -e "${RED}Error: Node.js uninstall failed${NC}"
-                exit 1
-            fi
-            
-            # Install Node.js LTS version
-            run_cmd pkg install nodejs-lts -y
-            if [ $? -ne 0 ]; then
-                log "Node.js LTS installation failed"
-                echo -e "${RED}Error: Node.js LTS installation failed${NC}"
-                exit 1
-            fi
-            
-            # Re-get Node.js version
-            NODE_VERSION=$(node --version 2>/dev/null | sed 's/v//' | cut -d. -f1)
-            echo -e "${GREEN}✅ Node.js downgraded to $(node --version)${NC}"
-            log "Node.js downgrade completed: $(node --version)"
-        else
-            log "User chose to continue with Node.js 25"
-            echo -e "${YELLOW}Continuing installation, but may encounter compatibility issues${NC}"
-            read -p "Continue? (y/n) [default: n]: " CONTINUE_INSTALL
-            CONTINUE_INSTALL=${CONTINUE_INSTALL:-n}
-            if [ "$CONTINUE_INSTALL" != "y" ] && [ "$CONTINUE_INSTALL" != "Y" ]; then
-                log "User chose to exit installation"
-                echo -e "${YELLOW}Installation cancelled${NC}"
-                exit 0
-            fi
+}
+
+wait_for_gateway() {
+    local attempt
+    for ((attempt=1; attempt<=30; attempt++)); do
+        if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null; then
+            return 0
         fi
-    fi
-    
-    log "Node.js version check passed: $NODE_VERSION"
+        [ "$attempt" -eq 30 ] || sleep 2
+    done
+    return 1
+}
+
+is_managed_openclaw_wrapper() {
+    node -e '
+const fs = require("fs");
+const [bin, base] = process.argv.slice(1);
+const lines = fs.readFileSync(bin, "utf8").replace(/\r?\n$/, "").split(/\r?\n/);
+const entries = [base + "/dist/entry.js", base + "/openclaw.mjs"];
+if (lines.length !== 2 || !/^#!\/.+\/sh$/.test(lines[0]) ||
+    !entries.some(p => lines[1] === `exec node "${p}" "$@"` || lines[1] === `exec node ${p} "$@"`)) process.exit(1);
+' "$NPM_BIN/openclaw" "$BASE_DIR" 2>/dev/null
 }
 
 configure_npm() {
-    # Configure NPM environment and install Openclaw
-    log "Starting NPM configuration"
-    echo -e "\n${YELLOW}[2/6] Configuring Openclaw...${NC}"
-
-    # Configure NPM global environment
-    mkdir -p "$NPM_GLOBAL"
-    npm config set prefix "$NPM_GLOBAL"
-    if [ $? -ne 0 ]; then
-        log "NPM prefix setup failed"
-        echo -e "${RED}Error: NPM prefix setup failed${NC}"
-        exit 1
-    fi
-    # Check if correct PATH setting already exists (avoid duplicate entries)
-    if ! grep -q "export PATH=$NPM_BIN:" "$BASHRC" 2>/dev/null; then
-        echo "export PATH=$NPM_BIN:\$PATH" >> "$BASHRC"
-    fi
-    export PATH="$NPM_BIN:$PATH"
-
-    # Set Node.js memory limit (avoid memory issues with large model configurations)
-    if ! grep -q 'export NODE_OPTIONS="--max-old-space-size=2048"' "$BASHRC" 2>/dev/null; then
-        echo 'export NODE_OPTIONS="--max-old-space-size=2048"' >> "$BASHRC"
-    fi
-    export NODE_OPTIONS="--max-old-space-size=2048"
-
-    # Create necessary directories before installation (Termux compatibility handling)
-    log "Creating Termux compatibility directories"
-    mkdir -p "$LOG_DIR" "$HOME/tmp"
-    if [ $? -ne 0 ]; then
-        log "Directory creation failed"
-        echo -e "${RED}Error: Directory creation failed${NC}"
-        exit 1
-    fi
-
-    # Set temporary directory (required for node-gyp compilation)
-    export TMPDIR="$HOME/tmp"
-
-    # Configure git to use HTTPS instead of SSH (resolves Termux SSH connection issues)
-    log "Configuring git HTTPS"
-    git config --global url."https://github.com/".insteadOf "ssh://git@github.com/" 2>/dev/null || true
-    git config --global --add url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
-    echo -e "${GREEN}✓ git HTTPS configuration completed${NC}"
-
-    # Create GYP configuration (prevents node-gyp from looking for Android NDK)
-    log "Configuring GYP environment"
-    mkdir -p "$HOME/.gyp"
-    echo "{'variables':{'android_ndk_path':''}}" > "$HOME/.gyp/include.gypi"
-    echo -e "${GREEN}✓ GYP configuration completed${NC}"
-
-    # Check and install/update Openclaw
-    # If user didn't specify version, default to latest
-    if [ -z "$TARGET_VERSION" ]; then
-        TARGET_VERSION="latest"
-    fi
-    INSTALLED_VERSION=""
-    LATEST_VERSION=""
-    NEED_UPDATE=0
-
-    log "Checking Openclaw installation status"
-    if [ -f "$NPM_BIN/openclaw" ]; then
-        log "Openclaw is installed, checking version"
-        echo -e "${BLUE}Checking Openclaw version...${NC}"
-        INSTALLED_VERSION=$(npm list -g openclaw --depth=0 2>/dev/null | grep -oE 'openclaw@[0-9]+\.[0-9]+\.[0-9]+' | cut -d@ -f2)
-        if [ -z "$INSTALLED_VERSION" ]; then
-            log "Version extraction failed, trying fallback method"
-            INSTALLED_VERSION=$(npm view openclaw version 2>/dev/null || echo "unknown")
-        fi
-        echo -e "${BLUE}Current version: $INSTALLED_VERSION${NC}"
-
-        # Get latest version
-        log "Getting latest version info"
-        echo -e "${BLUE}Fetching latest version info from npm...${NC}"
-        LATEST_VERSION=$(npm view openclaw version 2>/dev/null || echo "")
-
-        if [ -z "$LATEST_VERSION" ]; then
-            log "Unable to get latest version info"
-            echo -e "${YELLOW}⚠️  Unable to get latest version info (possibly network issue), keeping current version${NC}"
-        else
-            echo -e "${BLUE}Latest version: $LATEST_VERSION${NC}"
-
-            # Determine if update is needed (user specified version or check latest)
-            NEED_UPDATE=0
-            if [ "$TARGET_VERSION" != "latest" ]; then
-                # User specified a specific version
-                if [ "$INSTALLED_VERSION" != "$TARGET_VERSION" ]; then
-                    # Compare versions to determine upgrade or downgrade (compatible method)
-                    compare_versions() {
-                        local v1="$1" v2="$2"
-                        local IFS='.'
-                        local i ver1=($v1) ver2=($v2)
-                        for ((i=0; i<${#ver1[@]} || i<${#ver2[@]}; i++)); do
-                            local n1=${ver1[i]:-0} n2=${ver2[i]:-0}
-                            n1=${n1%%[^0-9]*} n2=${n2%%[^0-9]*}
-                            if [[ $n1 -gt $n2 ]]; then return 1; fi
-                            if [[ $n1 -lt $n2 ]]; then return 2; fi
-                        done
-                        return 0
-                    }
-                    compare_versions "$INSTALLED_VERSION" "$TARGET_VERSION"
-                    cmp_result=$?
-                    if [ $cmp_result -eq 1 ]; then
-                        # v1 > v2 = current > target = downgrade
-                        log "Downgrade to specified version: $TARGET_VERSION (current: $INSTALLED_VERSION)"
-                        echo -e "${YELLOW}🔄 Downgrade to specified version: $TARGET_VERSION (current: $INSTALLED_VERSION)${NC}"
-                    else
-                        # v1 < v2 = current < target = upgrade
-                        log "Upgrade to specified version: $TARGET_VERSION (current: $INSTALLED_VERSION)"
-                        echo -e "${YELLOW}🔔 Upgrade to specified version: $TARGET_VERSION (current: $INSTALLED_VERSION)${NC}"
-                    fi
-                    NEED_UPDATE=1
-                else
-                    log "Version is already the specified version"
-                    echo -e "${GREEN}✅ Openclaw is already the specified version $INSTALLED_VERSION${NC}"
-                fi
-            else
-                # User didn't specify version, default to checking latest
-                if [ "$INSTALLED_VERSION" != "$LATEST_VERSION" ]; then
-                    log "New version found: $LATEST_VERSION (current: $INSTALLED_VERSION)"
-                    echo -e "${YELLOW}🔔 New version found: $LATEST_VERSION (current: $INSTALLED_VERSION)${NC}"
-                    NEED_UPDATE=1
-                fi
-            fi
-
-            if [ $NEED_UPDATE -eq 1 ]; then
-                if [ $FORCE_UPDATE -eq 1 ]; then
-                    log "Force update mode, updating directly"
-                    echo -e "${YELLOW}Updating Openclaw to $TARGET_VERSION...${NC}"
-                    # Use --ignore-scripts to skip native module compilation (koffi/clipboard cannot compile on Termux)
-                    run_cmd env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g openclaw@$TARGET_VERSION --ignore-scripts
-                    if [ $? -ne 0 ]; then
-                        log "Openclaw update failed"
-                        echo -e "${RED}Error: Openclaw update failed${NC}"
-                        exit 1
-                    fi
-                    log "Openclaw update completed"
-                    INSTALLED_VERSION=$(npm list -g openclaw --depth=0 2>/dev/null | grep -oE 'openclaw@[0-9]+\.[0-9]+\.[0-9]+' | cut -d@ -f2)
-                    echo -e "${GREEN}✅ Openclaw updated to $INSTALLED_VERSION${NC}"
-                else
-                    if [ "$TARGET_VERSION" != "latest" ]; then
-                        read -p "Install specified version $TARGET_VERSION? (y/n) [default: y]: " UPDATE_CHOICE
-                    else
-                        read -p "Update to new version? (y/n) [default: y]: " UPDATE_CHOICE
-                    fi
-                    UPDATE_CHOICE=${UPDATE_CHOICE:-y}
-
-                    if [ "$UPDATE_CHOICE" = "y" ] || [ "$UPDATE_CHOICE" = "Y" ]; then
-                        log "Starting Openclaw update to $TARGET_VERSION"
-                        echo -e "${YELLOW}Updating Openclaw to $TARGET_VERSION...${NC}"
-                        # Use --ignore-scripts to skip native module compilation (koffi/clipboard cannot compile on Termux)
-                        run_cmd env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g openclaw@$TARGET_VERSION --ignore-scripts
-                        if [ $? -ne 0 ]; then
-                            log "Openclaw update failed"
-                            echo -e "${RED}Error: Openclaw update failed${NC}"
-                            exit 1
-                        fi
-                        log "Openclaw update completed"
-                        INSTALLED_VERSION=$(npm list -g openclaw --depth=0 2>/dev/null | grep -oE 'openclaw@[0-9]+\.[0-9]+\.[0-9]+' | cut -d@ -f2)
-                        echo -e "${GREEN}✅ Openclaw updated to $INSTALLED_VERSION${NC}"
-                    else
-                        log "User chose to skip update"
-                        echo -e "${YELLOW}Skipping update, using current version${NC}"
-                    fi
-                fi
-            else
-                if [ "$TARGET_VERSION" = "latest" ]; then
-                    log "Version is already up to date"
-                    echo -e "${GREEN}✅ Openclaw is already the latest version $INSTALLED_VERSION${NC}"
-                fi
-            fi
-        fi
-    else
-        log "Starting Openclaw installation"
-        echo -e "${YELLOW}Installing Openclaw $TARGET_VERSION...${NC}"
-        # Use --ignore-scripts to skip native module compilation (koffi/clipboard cannot compile on Termux)
-        run_cmd env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g openclaw@$TARGET_VERSION --ignore-scripts
-        if [ $? -ne 0 ]; then
-            log "Openclaw installation failed"
-            echo -e "${RED}Error: Openclaw installation failed${NC}"
-            exit 1
-        fi
-        log "Openclaw installation completed"
-        INSTALLED_VERSION=$(npm list -g openclaw --depth=0 2>/dev/null | grep -oE 'openclaw@[0-9]+\.[0-9]+\.[0-9]+' | cut -d@ -f2)
-        if [ -z "$INSTALLED_VERSION" ]; then
-            INSTALLED_VERSION=$(npm view openclaw version 2>/dev/null || echo "unknown")
-        fi
-        echo -e "${GREEN}✅ Openclaw installed (version: $INSTALLED_VERSION)${NC}"
-    fi
-
+    local requested="${TARGET_VERSION:-latest}" resolved engine installed_engine
     BASE_DIR="$NPM_GLOBAL/lib/node_modules/openclaw"
-
-    # Verify if dist directory exists
-    if [ ! -d "$BASE_DIR/dist" ]; then
-        log "dist directory missing, attempting to build..."
-        echo -e "${YELLOW}⚠️  dist directory missing, attempting to build...${NC}"
-        cd "$BASE_DIR"
-        # Try multiple build methods
-        if [ -f "tsconfig.json" ]; then
-            npx tsc --skipLibCheck 2>/dev/null || true
-        fi
-        npm run build 2>/dev/null || true
-        # Verify again
-        if [ ! -d "$BASE_DIR/dist" ]; then
-            log "dist directory build failed"
-            echo -e "${RED}Error: dist directory build failed, Openclaw may not run properly${NC}"
-            echo -e "${YELLOW}Please check for compilation errors or try building manually${NC}"
-            exit 1
-        fi
-        log "dist directory built successfully"
-        echo -e "${GREEN}✓ dist directory built successfully${NC}"
+    export PATH="$NPM_BIN:$PATH"
+    INSTALLED_VERSION=""
+    if [ -f "$BASE_DIR/package.json" ]; then
+        INSTALLED_VERSION=$(package_version "$BASE_DIR")
+        [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "undefined" ] || {
+            echo -e "${RED}Error: Cannot read installed OpenClaw package version${NC}" >&2; return 1;
+        }
     fi
+    if [ "$requested" = latest ]; then
+        resolved=$(npm view openclaw@latest version 2>/dev/null) || resolved=""
+    else
+        resolved=$(npm view "openclaw@$requested" version 2>/dev/null) || resolved=""
+        if [ "$resolved" != "$requested" ]; then
+            echo -e "${RED}Error: Requested version $requested is unavailable or not an exact version${NC}" >&2
+            return 1
+        fi
+    fi
+    if ! [[ "$resolved" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+        echo -e "${RED}Error: Cannot resolve a concrete OpenClaw version from npm (network or metadata failure)${NC}" >&2
+        return 1
+    fi
+    TARGET_VERSION="$resolved"
+    engine=$(npm view "openclaw@$resolved" engines.node 2>/dev/null) || engine=""
+    if [ -z "$engine" ] || [ "$engine" = "undefined" ]; then
+        echo -e "${RED}Error: Cannot read engines.node for OpenClaw $resolved${NC}" >&2
+        return 1
+    fi
+    echo -e "${BLUE}Target OpenClaw: $resolved; Node.js requirement: $engine${NC}"
 
-    # Create openclaw wrapper script (resolves ESM bin path resolution issues)
-    # Original bin file uses ESM dynamic import, symlink method cannot correctly resolve module paths
-    # Use shell script wrapper to directly call node to execute entry.js
-    log "Creating openclaw wrapper script"
-    if [ -d "$BASE_DIR/dist" ] && [ -f "$BASE_DIR/dist/entry.js" ]; then
-        cat > "$NPM_BIN/openclaw" << WRAPPER
-#!/data/data/com.termux/files/usr/bin/sh
-exec node $BASE_DIR/dist/entry.js "\$@"
+    local install_needed=1
+    if [ -n "$INSTALLED_VERSION" ]; then
+        echo -e "${BLUE}Installed OpenClaw: $INSTALLED_VERSION${NC}"
+        if [ "$INSTALLED_VERSION" = "$resolved" ]; then
+            install_needed=0
+        elif [ "$FORCE_UPDATE" -eq 0 ]; then
+            read -p "Install $resolved (currently $INSTALLED_VERSION)? (y/n) [default: y]: " UPDATE_CHOICE
+            UPDATE_CHOICE=${UPDATE_CHOICE:-y}
+            if [ "$UPDATE_CHOICE" != y ] && [ "$UPDATE_CHOICE" != Y ]; then install_needed=0; fi
+        fi
+    fi
+    if [ "$install_needed" -eq 0 ]; then
+        installed_engine=$(node -p "require(process.argv[1]).engines?.node || ''" "$BASE_DIR/package.json" 2>/dev/null) || installed_engine=""
+        [ -n "$installed_engine" ] || { echo -e "${RED}Error: Installed version is missing engines.node${NC}" >&2; return 1; }
+        check_engine "$INSTALLED_VERSION" "$installed_engine" || return 1
+        echo -e "${YELLOW}Keeping installed version $INSTALLED_VERSION${NC}"
+    fi
+    if [ "$install_needed" -eq 1 ]; then
+        check_engine "$resolved" "$engine" || return 1
+        mkdir -p "$NPM_GLOBAL" "$LOG_DIR" "$HOME/tmp"
+        npm config set prefix "$NPM_GLOBAL" || return 1
+        export TMPDIR="$HOME/tmp"
+        # Only remove wrappers previously created by this installer, not unrelated binaries.
+        if [ -e "$NPM_BIN/openclaw" ] && [ ! -L "$NPM_BIN/openclaw" ]; then
+            if is_managed_openclaw_wrapper; then
+                rm "$NPM_BIN/openclaw" || return 1
+            else
+                echo -e "${RED}Error: $NPM_BIN/openclaw is an unknown regular file; refusing to overwrite it.${NC}" >&2
+                return 1
+            fi
+        fi
+        if ! env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g "openclaw@$resolved" --ignore-scripts; then
+            echo -e "${RED}Error: Android may not support a required native dependency; use proot instead.${NC}" >&2
+            return 1
+        fi
+        [ "$(package_version "$BASE_DIR")" = "$resolved" ] || {
+            echo -e "${RED}Error: Installed package version does not match $resolved${NC}" >&2; return 1;
+        }
+        (cd "$BASE_DIR" && npm run postinstall --if-present --ignore-scripts) || {
+            echo -e "${RED}Error: OpenClaw postinstall failed; use proot if Android native features are unsupported.${NC}" >&2
+            return 1
+        }
+        echo -e "${YELLOW}Dependency native install scripts were skipped: some Android native features may be unavailable; use proot if they fail.${NC}"
+    fi
+    local native_file
+    for native_file in "$BASE_DIR/node_modules/koffi/index.js" \
+        "$BASE_DIR/node_modules/@lancedb/lancedb/index.js" \
+        "$BASE_DIR/node_modules/@mariozechner/clipboard/index.js"; do
+        if [ -f "$native_file" ] &&
+            grep -Eq 'stub for android-arm64|module.exports = \{ availableFormats:\(\)=>\[\]' "$native_file"; then
+            echo -e "${RED}Error: Legacy fake native modules detected; cleanly reinstall the official package or use proot.${NC}" >&2
+            return 1
+        fi
+    done
+    [ -f "$BASE_DIR/openclaw.mjs" ] || {
+        echo -e "${RED}Error: Official openclaw.mjs entrypoint missing${NC}" >&2; return 1;
+    }
+    mkdir -p "$NPM_BIN"
+    # npm's bin can link to openclaw.mjs. Unlink before writing a shell wrapper.
+    if [ -e "$NPM_BIN/openclaw" ] && [ ! -L "$NPM_BIN/openclaw" ] &&
+       ! is_managed_openclaw_wrapper; then
+        echo -e "${RED}Error: $NPM_BIN/openclaw is an unknown regular file; refusing to overwrite it.${NC}" >&2
+        return 1
+    fi
+    if [ -L "$NPM_BIN/openclaw" ]; then rm "$NPM_BIN/openclaw" || return 1; fi
+    cat > "$NPM_BIN/openclaw" <<WRAPPER
+#!${PREFIX:-/data/data/com.termux/files/usr}/bin/sh
+exec node "$BASE_DIR/openclaw.mjs" "\$@"
 WRAPPER
-        chmod +x "$NPM_BIN/openclaw"
-        echo -e "${GREEN}✓ openclaw wrapper script created successfully${NC}"
-    fi
-
-    # Apply koffi stub (Termux compatibility fix)
-    apply_koffi_stub
+    chmod +x "$NPM_BIN/openclaw"
 }
 
 apply_patches() {
@@ -601,46 +446,6 @@ apply_patches() {
         log "npm path does not need fixing"
     fi
 
-    # Fix clipboard
-    CLIP_FILE="$BASE_DIR/node_modules/@mariozechner/clipboard/index.js"
-    if [ -f "$CLIP_FILE" ]; then
-        log "Applying clipboard patch"
-        node -e "const fs = require('fs'); const file = '$CLIP_FILE'; const mock = 'module.exports = { availableFormats:()=>[], getText:()=>\"\", setText:()=>false, hasText:()=>false, getImageBinary:()=>null, getImageBase64:()=>null, setImageBinary:()=>false, setImageBase64:()=>false, hasImage:()=>false, getHtml:()=>\"\", setHtml:()=>false, hasHtml:()=>false, getRtf:()=>\"\", setRtf:()=>false, hasRtf:()=>false, clear:()=>{}, watch:()=>({stop:()=>{}}), callThreadsafeFunction:()=>{} };'; fs.writeFileSync(file, mock);"
-        if [ $? -ne 0 ]; then
-            log "Clipboard patch application failed"
-            echo -e "${RED}Error: Clipboard patch application failed${NC}"
-            exit 1
-        fi
-        # Verify if patch was applied
-        if ! grep -q "availableFormats" "$CLIP_FILE"; then
-            log "Clipboard patch verification failed"
-            echo -e "${RED}Error: Clipboard patch was not applied correctly, please check file content${NC}"
-            exit 1
-        fi
-        log "Clipboard patch applied successfully"
-    fi
-
-    # Fix openclaw executable shebang (Termux compatibility)
-    OPENCLAW_BIN="$NPM_BIN/openclaw"
-    if [ -f "$OPENCLAW_BIN" ]; then
-        log "Checking and fixing openclaw executable shebang"
-        # Only fix when /usr/bin/env doesn't exist (i.e., Termux environment)
-        if [ ! -x "/usr/bin/env" ] && head -n1 "$OPENCLAW_BIN" | grep -q "^#!/usr/bin/env"; then
-            # Use PREFIX environment variable to get Termux's actual prefix path
-            TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
-            # Confirm target env exists and is executable
-            if [ -x "${TERMUX_PREFIX}/bin/env" ]; then
-                sed -i "1s|#!/usr/bin/env|#!${TERMUX_PREFIX}/bin/env|" "$OPENCLAW_BIN"
-                log "openclaw shebang fixed"
-                echo -e "${GREEN}✓ openclaw shebang fixed to Termux compatible path${NC}"
-            else
-                log "Warning: Termux env path does not exist"
-                echo -e "${YELLOW}⚠️  Termux env path does not exist, skipping shebang fix${NC}"
-            fi
-        else
-            log "openclaw shebang does not need fixing"
-        fi
-    fi
 }
 
 setup_autostart() {
@@ -690,22 +495,25 @@ ocr() {
     pkill -9 -f 'openclaw' 2>/dev/null
     tmux kill-session -t openclaw 2>/dev/null
     sleep 1
-    tmux new -d -s openclaw
+    tmux new -d -s openclaw || return 1
     sleep 1
-    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured" C-m
-    sleep 2
-    if tmux has-session -t openclaw 2>/dev/null; then
+    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured" C-m || return 1
+    local attempt
+    for ((attempt=1; attempt<=30; attempt++)); do
+        if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null; then break; fi
+        [ "\$attempt" -eq 30 ] || sleep 2
+    done
+    if [ "\$attempt" -le 30 ]; then
         echo ""
-        echo -e "\${GREEN}✅ OpenClaw service started\${NC}"
-        echo ""
-        echo -e "\${CYAN}📖 Usage:\${NC}"
+        echo -e "\${GREEN}✅ Gateway /healthz ready (model function not verified)\${NC}"
         echo "   1. Open in phone browser:: http://localhost:$PORT/?token=\$OPENCLAW_GATEWAY_TOKEN"
         echo "   2. Or run command: openclaw tui"
         echo "   3. Or use Telegram bot (if configured)"
         echo ""
         echo -e "\${BLUE}💡 oclog to view logs | ockill to stop service\${NC}"
     else
-        echo -e "\${RED}❌ Service failed to start, please check logs (openclaw logs)\${NC}"
+        echo -e "\${RED}Gateway did not respond at HTTP /healthz in time; check oclog. Use proot if Android native features are unsupported.\${NC}"
+        return 1
     fi
 }
 
@@ -776,9 +584,12 @@ start_service() {
             tmux kill-session -t openclaw 2>/dev/null || true
             sleep 1
         else
-            log "User chose not to restart"
-            echo -e "${GREEN}Skipping startup, keeping current instance running${NC}"
-            return 0
+            if wait_for_gateway; then
+                echo -e "${GREEN}Existing Gateway HTTP /healthz ready (model function not verified)${NC}"
+                return 0
+            fi
+            echo -e "${RED}Error: Existing Gateway did not respond at HTTP /healthz${NC}" >&2
+            return 1
         fi
     fi
 
@@ -798,12 +609,11 @@ start_service() {
     echo ""
     
     # 4. Real-time verification
-    sleep 2
-    if tmux has-session -t openclaw 2>/dev/null; then
-        echo -e "${GREEN}[6/6] ✅ tmux session established, Gateway service started!${NC}"
+    if wait_for_gateway; then
+        echo -e "${GREEN}[6/6] Gateway HTTP /healthz ready (model function not verified)${NC}"
     else
-        echo -e "${RED}❌ Error: tmux session crashed immediately after startup.${NC}"
-        echo -e "Please check error log: ${YELLOW}cat $LOG_DIR/runtime.log${NC}"
+        echo -e "${RED}Error: Gateway did not respond at HTTP /healthz in time; check $LOG_DIR/runtime.log. Use proot if Android native features are unsupported.${NC}" >&2
+        return 1
     fi
 }
 
@@ -869,10 +679,8 @@ uninstall_openclaw() {
 
 # Main script
 
-# Uninstall mode executes directly
-if [ $UNINSTALL -eq 1 ]; then
+if [ "$UNINSTALL" -eq 1 ]; then
     uninstall_openclaw
-    # In source mode, return only exits the script, exit would exit the entire shell
     [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 0 || return 0
 fi
 
@@ -934,11 +742,11 @@ AUTO_START=${AUTO_START:-y}
 # Execution steps
 log "Script starting, user configuration: port=$PORT, Token=$TOKEN, autostart=$AUTO_START"
 check_deps
-configure_npm
+configure_npm || { [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 || return 1; }
 apply_patches
 setup_autostart
 activate_wakelock
-start_service
+start_service || { [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 || return 1; }
 
 echo ""
 echo -e "${GREEN}=========================================="
@@ -956,12 +764,6 @@ echo -e "${BLUE}│${NC}  ${CYAN}ocr${NC}      - Restart service            ${BL
 echo -e "${BLUE}└─────────────────────────────────────┘${NC}"
 echo ""
 
-# dry-run mode skips configuration guide
-if [ $DRY_RUN -eq 1 ]; then
-    echo -e "${YELLOW}Dry run completed, no actual installation performed${NC}"
-    log "Dry run completed"
-    exit 0
-fi
 
 # Update mode skips configuration guide
 if [ $FORCE_UPDATE -eq 1 ]; then
@@ -970,12 +772,7 @@ if [ $FORCE_UPDATE -eq 1 ]; then
     exit 0
 fi
 
-# Check if service started normally
-if ! tmux has-session -t openclaw 2>/dev/null; then
-    echo -e "${RED}Service failed to start, please check logs (openclaw logs) and manually run openclaw onboard${NC}"
-    log "Service failed to start"
-    exit 1
-fi
+# start_service already checked Gateway HTTP readiness; model function still requires configuration.
 
 # Function to display final information
 show_final_info() {
@@ -994,9 +791,7 @@ show_final_info() {
         echo -e "${GREEN}✅ Configuration completed!${NC}"
         if [ "$SHOW_IGNORE_HINT" = "true" ]; then
             echo ""
-            echo -e "If ${YELLOW}'Gateway service install not supported on android'${NC} error appears, it can be ${CYAN}ignored${NC}."
-            echo ""
-            echo -e "${YELLOW}Do not use openclaw gateway command${NC}, use ${CYAN}ocr${NC} command to start Gateway."
+            echo -e "${YELLOW}Android does not support Gateway service install; use ocr to start a user-session Gateway. Other native module failures cannot be ignored; use proot.${NC}"
         fi
         echo ""
         echo -e "${CYAN}👉 Next step: Open in phone browser${NC}"
@@ -1006,7 +801,7 @@ show_final_info() {
         echo -e "${YELLOW}Please manually run openclaw onboard to continue configuration${NC}"
         if [ "$SHOW_IGNORE_HINT" = "true" ]; then
             echo ""
-            echo -e "${YELLOW}During configuration, if 'Gateway service install not supported on android' error appears, it can be ignored.${NC} Also, don't use openclaw gateway command, use ocr command to start."
+            echo -e "${YELLOW}Gateway service install is unsupported on Android; use ocr. Use proot for native module failures.${NC}"
         fi
     fi
 }
@@ -1020,9 +815,7 @@ echo -e "About to execute ${YELLOW}openclaw onboard${NC} command..."
 echo ""
 echo -e "Please prepare your ${YELLOW}LLM API Key${NC}. Recommended providers: MiniMax (minimax-cn), Zhipu (z-ai), etc."
 echo ""
-echo -e "After configuration, if ${YELLOW}'Gateway service install not supported on android'${NC} error appears, it can be ${CYAN}ignored${NC}."
-echo ""
-echo -e "${YELLOW}⚠️ Do not use openclaw gateway command${NC}. Use ${CYAN}ocr${NC} command to start."
+echo -e "${YELLOW}Gateway service install is unsupported on Android; ocr starts Gateway in tmux. Use proot for other native module failures.${NC}"
 echo ""
 read -p "Continue? [Y/n]: " CONTINUE_ONBOARD
 CONTINUE_ONBOARD=${CONTINUE_ONBOARD:-y}
@@ -1055,13 +848,12 @@ if [[ "$CONTINUE_ONBOARD" =~ ^[Yy]$ ]]; then
             tmux new -d -s openclaw
             sleep 1
             tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=$TOKEN; openclaw gateway --bind loopback --port $PORT --token \$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured 2>&1 | tee $LOG_DIR/runtime.log" C-m
-            sleep 2
-            if tmux has-session -t openclaw 2>/dev/null; then
-                log "Gateway restarted successfully"
-                echo -e "${GREEN}✅ Gateway service restarted, Token configuration applied${NC}"
+            if wait_for_gateway; then
+                log "Gateway HTTP ready"
+                echo -e "${GREEN}Gateway /healthz ready (model function not verified)${NC}"
             else
-                log "Gateway restart failed"
-                echo -e "${RED}⚠️ Gateway restart failed, please manually run ocr command${NC}"
+                echo -e "${RED}Error: Gateway did not respond at HTTP /healthz after restart. Check logs; use proot if Android native features are unsupported.${NC}" >&2
+                [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 || return 1
             fi
         else
             log "Warning: Failed to update token in openclaw.json"

@@ -1,877 +1,176 @@
-# Openclaw Termux 一键部署脚本
+# OpenClaw on Termux
 
-> 🦞 在 Android Termux 环境下一键部署 Openclaw，让您在移动设备上轻松运行 AI 网关服务
+在 Android 的 Termux 环境安装、更新和管理 OpenClaw Gateway。
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Termux](https://img.shields.io/badge/platform-Termux-green.svg)](https://termux.com/)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
-[![English](https://img.shields.io/badge/lang-English-blue.svg)](README.en.md)
-[![中文](https://img.shields.io/badge/lang-中文-red.svg)](README.md)
+[English](README.en.md) · [OpenClaw 上游](https://github.com/openclaw/openclaw) · [报告问题](https://github.com/qq892601987/install-openclaw-on-termux/issues)
 
 ![OpenClaw on Termux Preview](./sources/OpenClaw-on-Termux-Preview.png)
 
-[更多预览图](https://mp.weixin.qq.com/s/KASWkkuD2-Q5f22FDQ7bNA)
+## 兼容性与限制
 
-## 📖 目录
+本次更新对照 OpenClaw **2026.10.8** 的发布契约；**尚未完成 Android/Termux 真机验收**，不代表该版本的所有功能已经适配。
 
-- [项目简介](#项目简介)
-- [功能特性](#功能特性)
-- [系统要求](#系统要求)
-- [快速开始](#快速开始)
-- [详细使用](#详细使用)
-- [配置说明](#配置说明)
-- [常用命令](#常用命令)
-- [故障排除](#故障排除)
-- [卸载指南](#卸载指南)
-- [技术细节](#技术细节)
-- [常见问题](#常见问题)
-- [贡献指南](#贡献指南)
-- [许可证](#许可证)
+- OpenClaw 2026.10.8 要求 Node.js **`>=24.22.1 <25 || >=26.12.1`**。其他版本以该版本 npm 包的 `engines.node` 为准，不能只检查“Node ≥22”或主版本号。
+- 安装器默认将 npm `latest` 解析为一个具体版本，再读取并检查该版本的 Node 要求。需要可重复安装时，请使用 `--version` 指定准确版本。
+- 原生 Termux 使用 Android/Bionic；Linux 原生模块不一定能用。脚本不再用假的 koffi、LanceDB 或剪贴板模块掩盖不支持的功能，也不强制绕过平台检查。
+- **原生安装遇到平台或原生模块错误时，优先尝试下方 proot Ubuntu 方案。** proot 提供 Linux 用户空间，但仍受 Android 后台管理、内存和系统调用限制，不等于完整 Linux 主机。
+- Gateway 的 HTTP `/healthz` 就绪检查只证明服务响应，不证明模型凭据、消息渠道、向量库、浏览器或剪贴板功能可用。安装后还需配置并测试实际使用的功能。
 
----
+## 选择安装入口
 
-## 项目简介
+| 脚本 | 用途 |
+| --- | --- |
+| `install-openclaw-termux.sh` | 原生 Termux，中文交互 |
+| `install-openclaw-termux_En.sh` | 原生 Termux，英文交互 |
+| `install-openclaw-termux-v2.sh` | 分阶段原生安装器，额外支持 `--yes`、`--list-versions`、端口和自启动选项 |
+| `install_openclaw_termux_proot.sh` | 在 Termux 的 proot Ubuntu 内安装；与原生安装使用不同的用户目录和运行环境 |
 
-Openclaw 是一个强大的 AI 网关服务，本脚本专门为在 Android Termux 环境中部署 Openclaw 而设计。通过自动化安装流程，解决了 Termux 环境下的诸多兼容性问题，包括：
+请从可信来源安装最新 Termux（例如 F-Droid），准备稳定网络和足够的存储空间。依赖包、npm 下载及原生模块可能占用较多空间；旧版文档的“500MB 足够”不作为容量保证。
 
-- ✅ 自动检查并安装所有必要的依赖包
-- ✅ 自动应用 Android 兼容性补丁（日志路径、剪贴板等）
-- ✅ 配置 NPM 全局环境和镜像源
-- ✅ 设置 Termux 唤醒锁防止休眠
-- ✅ 使用 tmux 实现后台持久运行
-- ✅ 提供便捷的别名命令管理服务
+### 原生 Termux
 
----
-
-## 功能特性
-
-### 🚀 一键部署
+直接使用本仓库地址，避免短链接指向旧脚本：
 
 ```bash
-curl -sL https://s.zhihai.me/openclaw > openclaw-install.sh && source openclaw-install.sh
-```
-
-### 🔧 自动化配置
-
-- **依赖检查**：自动检测并安装 Node.js、Git、CMake 等必要组件
-- **版本验证**：确保 Node.js 版本 ≥ 22
-- **镜像加速**：自动配置 NPM 镜像源为国内镜像
-- **兼容性补丁**：
-  - 修复 Logger 路径（`/tmp/openclaw` → `$HOME/openclaw-logs`）
-  - 修复剪贴板模块（Termux 环境兼容）
-  - 创建 `/tmp` 符号链接
-
-### 💪 高可用性
-
-- **唤醒锁**：自动激活 Termux 唤醒锁，防止系统休眠
-- **后台运行**：使用 tmux 实现服务持久化
-- **自动重启**：提供一键重启命令
-- **日志管理**：实时日志记录和查看
-
-### 🛡️ 安全机制
-
-- **Token 认证**：支持自定义访问 Token
-- **端口配置**：可自定义 Gateway 端口
-- **SSH 服务**：可选自动启动 SSHD
-
-### 📊 监控与管理
-
-- **实时日志**：通过 `oclog` 命令查看运行状态
-- **服务控制**：提供启动、停止、重启快捷命令
-- **详细日志**：完整的安装和运行日志记录
-
----
-
-## 系统要求
-
-| 组件 | 要求 |
-|------|------|
-| **操作系统** | Android 7.0+ |
-| **Termux** | 最新版本（推荐通过 F-Droid 安装） |
-| **Node.js** | ≥ 22.0.0（脚本会自动检查） |
-| **存储空间** | ≥ 500MB 可用空间 |
-| **内存** | ≥ 2GB RAM 推荐 |
-| **网络** | 稳定的网络连接（用于下载依赖） |
-
-### Termux 组件要求
-
-脚本会自动安装以下 Termux 组件（如果未安装）：
-
-- `nodejs` - Node.js 运行时
-- `git` - 版本控制工具
-- `openssh` - SSH 客户端/服务端
-- `tmux` - 终端复用器
-- `termux-api` - Termux API 扩展
-- `termux-tools` - Termux 工具集
-- `cmake` - 构建工具
-- `python` - Python 解释器
-- `golang` - Go 语言支持
-
----
-
-## 快速开始
-
-### 方法一：在线安装（推荐）
-
-```bash
-curl -sL https://s.zhihai.me/openclaw > openclaw-install.sh && source openclaw-install.sh
-```
-
-### 方法二：本地运行
-
-```bash
-# 1. 克隆或下载脚本
-git clone https://github.com/yourusername/install-openclaw-on-termux.sh.git
-cd install-openclaw-on-termux.sh
-
-# 2. 运行安装脚本
-source install-openclaw-termux.sh
-```
-
-### 交互式配置
-
-安装过程中，脚本会提示您输入以下配置：
-
-```
-请输入 Gateway 端口号 [默认: 18789]: 
-请输入自定义 Token (用于安全访问，建议强密码) [留空随机生成]: 
-是否需要开启开机自启动? (y/n) [默认: y]: 
-```
-
-**推荐配置**：
-- 端口：使用默认 `18789` 或自定义
-- Token：**建议手动输入强密码**，或让脚本生成随机 Token
-- 自启动：初次安装推荐 `y`，后续可通过脚本修改
-
----
-
-## 详细使用
-
-### 命令行选项
-
-```bash
-source install-openclaw-termux.sh [选项]
-```
-
-| 选项 | 简写 | 说明 |
-|------|------|------|
-| `--help` | `-h` | 显示帮助信息 |
-| `--verbose` | `-v` | 启用详细输出，显示每个执行的命令 |
-| `--dry-run` | `-d` | 模拟运行模式，不执行实际命令（用于测试） |
-| `--uninstall` | `-u` | 卸载 Openclaw 并清理配置 |
-| `--version` | `-V` | 指定 Openclaw 版本（如 2026.2.26），支持降级到旧版本 |
-
-### 使用示例
-
-```bash
-# 标准安装
-source install-openclaw-termux.sh
-
-# 详细输出模式安装
-source install-openclaw-termux.sh --verbose
-
-# 模拟运行（不实际安装）
-source install-openclaw-termux.sh --dry-run
-
-# 卸载 Openclaw
-source install-openclaw-termux.sh --uninstall
-
-# 安装指定版本（如需降级到旧版本）
-source install-openclaw-termux.sh --version 2026.2.26
-
-# 组合使用
-source install-openclaw-termux.sh -v -d  # 详细模式 + 模拟运行
-```
-
-### 安装流程
-
-脚本将依次执行以下 6 个步骤：
-
-```
-[1/6] 正在检查基础运行环境...
-      ↓
-[2/6] 正在配置 Openclaw...
-      ↓
-[3/6] 正在应用 Android 兼容性补丁...
-      ↓
-[4/6] 激活唤醒锁...
-      ↓
-[5/6] 启动服务...
-      ↓
-[6/6] 部署指令发送完毕
-```
-
----
-
-## 配置说明
-
-### 环境变量
-
-脚本会在 `~/.bashrc` 中添加以下环境变量：
-
-```bash
-export TERMUX_VERSION=1                    # Termux 标识
-export TMPDIR=$HOME/tmp                     # 临时目录
-export OPENCLAW_GATEWAY_TOKEN=your_token    # 访问 Token
-export PATH=$HOME/.npm-global/bin:$PATH     # NPM 全局路径
-```
-
-### 目录结构
-
-```
-$HOME/
-├── .bashrc                      # Shell 配置文件（脚本会修改）
-├── .bashrc.backup               # bashrc 备份（修改前自动创建）
-├── .npm-global/                 # NPM 全局包目录
-│   └── bin/                     # NPM 可执行文件目录
-│       └── openclaw             # Openclaw 可执行文件
-├── openclaw-logs/               # 日志目录
-│   ├── install.log             # 安装日志
-│   └── runtime.log              # 运行时日志
-└── tmp/                         # 临时文件目录
-```
-
-### 端口配置
-
-- **默认端口**：`18789`
-- **修改方式**：重新运行脚本并输入新端口
-- **访问地址**：`http://<设备IP>:<端口>`
-- **Token 认证**：需要在请求头中携带 `Authorization: Bearer <token>`
-
----
-
-## 常用命令
-
-安装完成后，脚本会创建以下快捷别名（如果在 ~/.bashrc 中启用）：
-
-| 别名 | 功能 | 使用示例 |
-|------|------|----------|
-| `ocr` | **重启服务** | `ocr` |
-| `oclog` | **查看日志** | `oclog` |
-| `ockill` | **停止服务** | `ockill` |
-
-### 命令详解
-
-#### 1. 重启服务 (`ocr`)
-
-```bash
-ocr
-```
-
-**功能**：停止现有服务并重新启动 Openclaw Gateway
-
-**内部流程**：
-```bash
-pkill -9 node                     # 停止所有 Node.js 进程
-tmux kill-session -t openclaw     # 销毁 tmux 会话
-sleep 1                           # 等待进程清理
-tmux new -d -s openclaw           # 创建新的 tmux 会话
-tmux send-keys -t openclaw "openclaw gateway --bind lan --port <port> --token <token>" C-m
-```
-
-#### 2. 查看日志 (`oclog`)
-
-```bash
-oclog
-```
-
-**功能**：附加到 tmux 会话，实时查看 Openclaw 运行日志
-
-**快捷键**：
-- `Ctrl+B` 然后 `D`：脱离会话（服务继续运行）
-- `Ctrl+C`：停止服务（不推荐）
-
-#### 3. 停止服务 (`ockill`)
-
-```bash
-ockill
-```
-
-**功能**：强制停止 Openclaw 服务
-
-**内部流程**：
-```bash
-pkill -9 node                     # 停止所有 Node.js 进程
-tmux kill-session -t openclaw     # 销毁 tmux 会话
-```
-
-### 手动管理命令
-
-如果您不想使用别名，也可以手动执行以下命令：
-
-```bash
-# 查看 tmux 会话状态
-tmux list-sessions
-
-# 附加到 openclaw 会话
-tmux attach -t openclaw
-
-# 脱离当前会话（快捷键：Ctrl+B 然后 D）
-tmux detach-client
-
-# 查看实时日志
-tail -f $HOME/openclaw-logs/runtime.log
-```
-
----
-
-## 故障排除
-
-### 安装失败
-
-#### 问题 1：Node.js 版本不符合要求
-
-**症状**：
-```
-错误：Node.js 版本必须 22 以上，当前版本: v20.x.x
-```
-
-**解决方案**：
-```bash
-# 更新 pkg 源
-pkg update -y
-
-# 卸载旧版 Node.js
-pkg uninstall nodejs
-
-# 安装最新版 Node.js
-pkg install nodejs -y
-
-# 验证版本
-node -v  # 应显示 v22.x.x 或更高
-```
-
-#### 问题 2：pkg update 失败
-
-**症状**：
-```
-错误：pkg 更新失败
-```
-
-**解决方案**：
-```bash
-# 清理缓存
-pkg clean
-
-# 更换源（可选）
-# 编辑 $PREFIX/etc/apt/sources.list，使用清华源或阿里源
-
-# 重新更新
-pkg update -y
-```
-
-#### 问题 3：NPM 镜像设置失败
-
-**症状**：
-```
-错误：NPM 镜像设置失败
-```
-
-**解决方案**：
-```bash
-# 手动设置镜像
-npm config set registry https://registry.npmmirror.com
-
-# 验证
-npm config get registry
-```
-
-### 服务启动失败
-
-#### 问题 1：tmux 会话启动后立即崩溃
-
-**症状**：
-```
-❌ 错误：tmux 会话启动后立即崩溃。
-请检查报错日志: cat $HOME/openclaw-logs/runtime.log
-```
-
-**解决方案**：
-```bash
-# 查看详细日志
-cat $HOME/openclaw-logs/runtime.log
-
-# 常见原因和解决方法：
-# 1. 端口被占用 → 更换端口
-# 2. Token 无效 → 重新运行脚本设置
-# 3. 内存不足 → 关闭其他应用
-```
-
-#### 问题 2：termux-wake-lock 激活失败
-
-**症状**：
-```
-⚠️  Wake-lock 激活失败，可能 termux-api 未正确安装
-```
-
-**解决方案**：
-```bash
-# 安装 termux-api
-pkg install termux-api -y
-
-# 检查 Termux 应用权限
-# 设置 → 权限 → 禁用电池优化 → 允许 Termux
-
-# 重新激活唤醒锁
-termux-wake-lock
-```
-
-#### 问题 3：无法连接到 Gateway
-
-**症状**：
-```bash
-curl: Connection refused
-```
-
-**解决方案**：
-```bash
-# 1. 检查服务是否运行
-tmux list-sessions
-
-# 2. 检查端口是否监听
-netstat -tuln | grep <port>
-
-# 3. 检查防火墙（部分 Android 设备）
-# 4. 确认使用正确的 IP 地址
-ip addr show wlan0
-
-# 5. 重启服务
-ocr
-```
-
-### 性能问题
-
-#### 问题 1：设备发热严重
-
-**解决方案**：
-```bash
-# 1. 限制 CPU 使用率（如果支持）
-# 2. 降低 Gateway 并发数
-# 3. 使用 `oclog` 查看是否有异常请求
-
-# 查看资源使用
-top -m 10
-```
-
-#### 问题 2：响应速度慢
-
-**解决方案**：
-```bash
-# 1. 检查网络连接
-ping -c 4 8.8.8.8
-
-# 2. 查看日志排查瓶颈
-oclog
-
-# 3. 清理系统缓存
-pkg clean
-```
-
-### 日志查看
-
-```bash
-# 安装日志
-cat $HOME/openclaw-logs/install.log
-
-# 运行时日志
-cat $HOME/openclaw-logs/runtime.log
-
-# 实时跟踪日志
-tail -f $HOME/openclaw-logs/runtime.log
-
-# 查看最近 50 行
-tail -n 50 $HOME/openclaw-logs/runtime.log
-```
-
----
-
-## 卸载指南
-
-### 方法一：使用脚本卸载
-
-```bash
-source install-openclaw-termux.sh --uninstall
-```
-
-**卸载内容**：
-- ✅ 停止 Openclaw 服务
-- ✅ 删除 ~/.bashrc 中的 Openclaw 配置
-- ✅ 卸载 Openclaw NPM 包
-- ✅ 删除日志目录 `$HOME/openclaw-logs`
-- ✅ 删除 NPM 全局目录 `$HOME/.npm-global`
-- ✅ 清理临时文件
-
-**保留内容**：
-- ✅ Bashrc 备份文件（可手动恢复）
-
-### 方法二：手动卸载
-
-```bash
-# 1. 停止服务
-pkill -9 node
-tmux kill-session -t openclaw
-
-# 2. 删除 bashrc 配置
-sed -i '/# --- Openclaw Start ---/,/# --- Openclaw End ---/d' ~/.bashrc
-sed -i '/export PATH=.*\.npm-global\/bin/d' ~/.bashrc
-
-# 3. 卸载 Openclaw
-npm uninstall -g openclaw
-
-# 4. 删除目录
-rm -rf ~/openclaw-logs
-rm -rf ~/.npm-global
-
-# 5. 重新加载 bashrc
+curl -fLsS https://raw.githubusercontent.com/qq892601987/install-openclaw-on-termux/main/install-openclaw-termux.sh -o openclaw-install.sh
+bash openclaw-install.sh
 source ~/.bashrc
 ```
 
----
-
-## 技术细节
-
-### 脚本架构
-
-```
-install-openclaw-termux.sh
-├── 参数解析 (parse arguments)
-│   ├── --verbose, -v
-│   ├── --dry-run, -d
-│   ├── --uninstall, -u
-│   └── --help, -h
-├── 核心函数 (core functions)
-│   ├── check_deps()          # 检查依赖
-│   ├── configure_npm()       # 配置 NPM
-│   ├── apply_patches()       # 应用补丁
-│   ├── setup_autostart()     # 配置自启动
-│   ├── activate_wakelock()   # 激活唤醒锁
-│   ├── start_service()       # 启动服务
-│   └── uninstall_openclaw() # 卸载函数
-├── 辅助函数 (helper functions)
-│   ├── log()                 # 日志记录
-│   └── run_cmd()             # 命令执行
-└── 主流程 (main execution)
-    ├── 环境初始化
-    ├── 交互配置
-    └── 步骤执行
-```
-
-### 兼容性补丁详解
-
-#### 1. Logger 补丁
-
-**问题**：Openclaw 默认使用 `/tmp/openclaw` 作为日志目录，但 Termux 的 `/tmp` 可能不存在或不可写。
-
-**解决方案**：
-```javascript
-// 替换前
-/tmp/openclaw
-
-// 替换后
-$HOME/openclaw-logs
-```
-
-**实现**：
-```bash
-node -e "const fs = require('fs'); const file = '$LOGGER_FILE'; 
-let c = fs.readFileSync(file, 'utf8'); 
-c = c.replace(/\/tmp\/openclaw/g, process.env.HOME + '/openclaw-logs'); 
-fs.writeFileSync(file, c);"
-```
-
-#### 2. 剪贴板补丁
-
-**问题**：`@mariozechner/clipboard` 模块依赖原生 C++ 模块，在 Termux 中编译失败。
-
-**解决方案**：使用 mock 对象替换原始剪贴板模块。
-
-**实现**：
-```bash
-node -e "const fs = require('fs'); const file = '$CLIP_FILE'; 
-const mock = 'module.exports = { 
-  availableFormats:()=>[], 
-  getText:()=>\"\", 
-  setText:()=>false, 
-  // ... 其他方法
-};'; 
-fs.writeFileSync(file, mock);"
-```
-
-### 错误处理机制
+也可以下载后先检查脚本，再运行。不要在下载失败后继续执行之前残留的文件。
 
 ```bash
-# 全局错误捕获
-trap 'echo -e "${RED}错误：脚本执行失败，请检查上述输出${NC}"; exit 1' ERR
-
-# 严格模式
-set -e          # 遇到错误立即退出
-set -o pipefail # 管道中任何命令失败都视为失败
-
-# 每步错误检查
-if [ $? -ne 0 ]; then
-    log "操作失败"
-    echo -e "${RED}错误：操作失败${NC}"
-    exit 1
-fi
+git clone https://github.com/qq892601987/install-openclaw-on-termux.git
+cd install-openclaw-on-termux
+bash install-openclaw-termux.sh --help
+bash install-openclaw-termux.sh
+source ~/.bashrc
 ```
 
-### 日志系统
+脚本会修改 npm 全局前缀、registry 和 `~/.bashrc`，并安装系统依赖。运行前备份自己的环境配置。推荐使用 `bash` 执行，完成后再加载 `~/.bashrc`；仍保留 `source` 调用方式。
+
+### proot Ubuntu
 
 ```bash
-# 日志目录结构
-$HOME/openclaw-logs/
-├── install.log    # 安装过程日志
-└── runtime.log    # 运行时日志（由 Openclaw 生成）
-
-# 日志格式
-YYYY-MM-DD HH:MM:SS [日志内容]
-
-# 日志级别
-- INFO: 一般信息
-- WARNING: 警告信息
-- ERROR: 错误信息
+curl -fLsS https://raw.githubusercontent.com/qq892601987/install-openclaw-on-termux/main/install_openclaw_termux_proot.sh -o openclaw-proot.sh
+bash openclaw-proot.sh --help
+bash openclaw-proot.sh --version 2026.10.8
 ```
 
----
+此方案会安装或复用 Ubuntu、配置 apt 镜像和 nvm，并安装 Node 24 的最新维护版本；运行时仍须满足所选 OpenClaw 的完整版本范围。如果不满足，安装器停止并给出错误，不把 Node 24 一概视为兼容。该方案会更新 Ubuntu 软件包，请先备份已有 Ubuntu 环境。
 
-## 常见问题
+如果目标版本需要其他受支持的 Node LTS 主版本，可显式选择，例如 `OPENCLAW_NODE_VERSION=26 bash openclaw-proot.sh --version 2026.10.8`；安装器仍检查完整版本范围。
 
-<details>
-<summary><b>Q1: 为什么需要 Node.js ≥ 22？</b></summary>
+## 安装与更新选项
 
-Openclaw 依赖最新的 JavaScript 特性和原生模块，Node.js 22 引入了以下关键改进：
-- 更好的 ES 模块支持
-- 改进的 V8 引擎性能
-- 原生模块 ABI 兼容性
-- 安全性增强
+以下选项适用于中文、英文原生脚本；v2 的额外选项请查看其 `--help`。
 
-Termux 默认安装的 Node.js 版本可能较低，因此脚本会强制检查并提示升级。
-</details>
-
-<details>
-<summary><b>Q2: 脚本修改了 ~/.bashrc，会影响其他配置吗？</b></summary>
-
-不会。脚本会在修改前自动创建备份文件 `~/.bashrc.backup`。所有添加的配置都包含在明确的标记内：
+| 选项 | 说明 |
+| --- | --- |
+| `--help`, `-h` | 显示帮助 |
+| `--verbose`, `-v` | 详细输出 |
+| `--dry-run`, `-d` | 查看计划，不执行安装、配置写入或服务启动；不代表真实安装一定成功 |
+| `--version`, `-V <version>` | 安装指定版本，包括降级；不会再自动调用 `openclaw update` 改成其他版本 |
+| `--update`, `-U` | 不询问是否更新软件包；其他配置仍可能需要交互 |
+| `--uninstall`, `-u` | 卸载并清理脚本管理的配置；执行前先备份 |
 
 ```bash
-# --- Openclaw Start ---
-...
-# --- OpenClaw End ---
+# 指定版本；版本号仅作为示例，不代表已经真机验证
+bash install-openclaw-termux.sh --version 2026.10.8
+
+# 更新到运行时查询得到的 latest
+bash install-openclaw-termux.sh --update
+
+# 预览
+bash install-openclaw-termux.sh --dry-run
+
+# v2 非交互安装
+bash install-openclaw-termux-v2.sh --yes --version 2026.10.8
 ```
 
-卸载时，脚本会自动删除这些配置并可选择恢复原始 bashrc。
-</details>
+原生安装为避免 Android 不支持的依赖编译，先跳过 npm 自动生命周期，再显式执行 OpenClaw 包自身的 postinstall（如果存在）。这**不代表所有原生依赖已完成构建**；需要原生功能时仍须单独验证，失败应查看错误或改用 proot。proot 使用正常 npm 安装生命周期。
 
-<details>
-<summary><b>Q3: 如何在多个设备上使用同一个脚本？</b></summary>
+安装器使用 npm 提供的 `semver` 工具检查完整版本范围，因此需要能访问 npm registry。无法取得版本或运行时要求时会停止，不在信息缺失时猜测兼容性。
 
-脚本完全支持多设备部署，每个设备的配置（端口、Token）是独立的：
+## 配置和服务管理
 
-1. 在每个设备上单独运行脚本
-2. 为每个设备设置不同的端口或 Token
-3. 使用相同的命令管理服务
+- 默认端口：`18789`。
+- 默认仅绑定 loopback；在**同一手机**打开 `http://127.0.0.1:18789/`，按 Gateway 提示配置认证。
+- 不要直接将端口暴露到公网。局域网访问需要另行配置绑定地址、认证与安全访问方式。
+- 原生脚本的配置和快捷命令写入 `~/.bashrc`；v2 还使用 `~/.config/openclaw/env.sh`。
+- 配置文件中可能包含访问 Token，不要公开文件、截图、日志或带 Token 的网址。
 
-**注意**：如果所有设备在同一局域网内，请确保使用不同的端口避免冲突。
-</details>
-
-<details>
-<summary><b>Q4: 可以更换 NPM 镜像源吗？</b></summary>
-
-可以。脚本默认使用淘宝镜像 `https://registry.npmmirror.com`，您可以手动修改：
+原生脚本的服务命令：
 
 ```bash
-# 查看当前镜像
-npm config get registry
-
-# 更换为其他镜像（例如官方源）
-npm config set registry https://registry.npmjs.org
-
-# 或使用其他国内源
-# 华为云
-npm config set registry https://mirrors.huaweicloud.com/repository/npm/
-# 腾讯云
-npm config set registry https://mirrors.cloud.tencent.com/npm/
-```
-</details>
-
-<details>
-<summary><b>Q5: 服务崩溃后如何自动重启？</b></summary>
-
-当前版本使用 tmux 保持服务运行，但不会自动重启。您可以使用以下方法实现自动重启：
-
-**方法一：使用循环脚本**
-```bash
-while true; do
-  openclaw gateway --bind lan --port <port> --token <token>
-  sleep 5
-done
+source ~/.bashrc
+ocr       # 启动/重启，并等待 HTTP 就绪检查
+oclog     # 查看 tmux 会话输出
+ockill    # 停止服务
 ```
 
-**方法二：使用 systemd（Termux:Boot）**
-```bash
-# 安装 Termux:Boot
-pkg install termux-boot
+日志通常位于 `~/openclaw-logs/`；proot 部署日志位于 Termux 的 `~/deploy_openclaw_proot.log`。proot 内的 OpenClaw 配置和命令位于 Ubuntu 用户环境，不能把 Termux 外层的 npm 包当作同一个安装。
 
-# 创建启动脚本
-cat > ~/.termux/boot/openclaw.sh << EOF
-#!/bin/bash
-tmux new -d -s openclaw 'openclaw gateway --bind lan --port <port> --token <token>'
-EOF
-chmod +x ~/.termux/boot/openclaw.sh
-```
-</details>
+## 安装后检查与故障排除
 
-<details>
-<summary><b>Q6: 如何查看 Openclaw 的版本和配置？</b></summary>
+在实际安装 OpenClaw 的环境中执行：
 
 ```bash
-# 查看 Openclaw 版本
+node --version
 openclaw --version
-
-# 查看 Gateway 配置
+openclaw doctor
 openclaw gateway --help
-
-# 查看当前运行的服务
-openclaw status
+curl --fail --silent --show-error http://127.0.0.1:18789/healthz
 ```
-</details>
 
-<details>
-<summary><b>Q7: Termux 前台时服务运行正常，后台时停止运行？</b></summary>
+然后配置模型和渠道，完成一次实际模型请求。不要仅以 npm 安装成功、tmux 会话存在或 HTTP 健康检查成功判断所有功能正常。
 
-这是 Android 的电池优化机制导致的。解决方法：
+| 问题 | 处理 |
+| --- | --- |
+| Node 版本不满足 `engines.node` | 原生环境更新 Termux 包列表和 Node 包；proot 更新其 nvm Node。重新检查完整版本，不要使用 `--force` 掩盖错误。 |
+| `EBADPLATFORM`、原生库加载或编译失败 | 保留错误信息，尝试 proot；不要手动写入空模块伪装修复。 |
+| 缺少官方启动文件或构建产物 | 重新安装对应的 npm 发布包；不要在不完整的全局包目录中尝试 `tsc` 构建。 |
+| Gateway 健康检查超时 | 查看 `~/openclaw-logs/runtime.log`、端口占用及 `openclaw doctor` 输出。服务不会因为 tmux 存在就被判为成功。 |
+| 后台运行中断 | 关闭 Android 对 Termux 的电池优化，检查后台权限及唤醒锁。tmux 和唤醒锁不能保证系统永不杀进程。 |
 
-1. **禁用电池优化**：
-   - 设置 → 应用管理 → Termux → 电池 → 取消电池优化
+不要使用 `pkill -9 node`，它会杀死其他 Node 服务。`openclaw doctor` 可能提出配置修复，执行修复前备份状态目录。
 
-2. **激活唤醒锁**（脚本已自动执行）：
-   ```bash
-   termux-wake-lock
-   ```
+## 备份与卸载
 
-3. **添加到白名单**：
-   - 部分手机需要在系统设置中将 Termux 添加到后台运行白名单
-
-4. **使用 Termux:Boot**：
-   ```bash
-   pkg install termux-boot
-   ```
-</details>
-
-<details>
-<summary><b>Q8: 如何备份和迁移 Openclaw 配置？</b></summary>
+升级或降级前备份实际运行环境中的 `~/.openclaw`、shell 配置和自己的工作目录。新版可能迁移状态；只降级 npm 包不保证旧版还能读取迁移后的状态。备份文件包含凭据，应私密保存。
 
 ```bash
-# 备份配置
-mkdir -p ~/openclaw-backup
-cp ~/.bashrc ~/openclaw-backup/
-cp -r ~/.npm-global ~/openclaw-backup/
+# 在原生环境或 Ubuntu 内分别执行，按实际位置备份
+cp -a ~/.openclaw ~/.openclaw.backup-$(date +%Y%m%d-%H%M%S)
 
-# 迁移到新设备
-# 1. 将 backup 目录传输到新设备
-# 2. 恢复配置
-cp ~/openclaw-backup/.bashrc ~/.bashrc
-cp -r ~/openclaw-backup/.npm-global ~/.npm-global
-
-# 3. 重新运行脚本
-source install-openclaw-termux.sh
+# 原生卸载
+bash install-openclaw-termux.sh --uninstall
 ```
-</details>
 
----
+旧版原生卸载流程会删除 `~/.npm-global`，该目录可能还包含其他全局包；若有其他工具，请勿直接执行该卸载选项，先自行备份并逐项清理。proot 的移除应与原生安装分别处理，不要误删正在使用的 Ubuntu。
 
-## 贡献指南
+## 更新记录
 
-欢迎贡献代码、报告问题或提出建议！
+### 2026-10-28：新版 OpenClaw 兼容性更新
 
-### 报告问题
+- 按所选 npm 发布版本检查完整 Node 版本范围，解析具体版本后安装。
+- 使用官方 `openclaw.mjs` 入口，安全替换命令包装器，避免写穿 npm 符号链接。
+- 移除把自动更新当作构建的步骤和不完整 npm 包的源码构建回退。
+- 移除假的原生模块替换和额外的全局渠道 SDK 安装；不绕过平台检查。
+- 原生启动使用有界 HTTP 健康检查，proot 不再固定安装 Node 22。
+- 同步安装入口、功能限制和验证说明；本地验证不代替 Android 真机验收。
 
-在提交 Issue 前，请确认：
+## 本地回归检查
 
-1. ✅ 已阅读本文档的"故障排除"部分
-2. ✅ 提供详细的错误信息和复现步骤
-3. ✅ 附上相关日志（`$HOME/openclaw-logs/runtime.log`）
-4. ✅ 说明您的系统环境（Termux 版本、Android 版本、Node.js 版本等）
+本次在 macOS arm64 / Node 26.12.1 上通过：四个脚本的语法检查、33 个 CLI 安全场景、实际 npm 指定版本安装与 postinstall、三个原生入口的包装器和 HTTP 就绪/超时路径。真实 OpenClaw 2026.10.8 Gateway 的 `/healthz` 返回 `{"ok":true,"status":"live"}`。服务管理命令在隔离环境中验证，未验证 Android 的 pkg、tmux、proot 或实际模型调用。
 
-### 提交代码
+```bash
+python3 -m unittest discover -s tests -v
+for script in *.sh; do bash -n "$script" || break; done
+```
 
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
+CLI 回归检查覆盖帮助、错误参数和 dry-run 不修改用户目录的安全边界，不代替真机安装和模型请求验证。
 
-### 代码规范
+## 反馈
 
-- 遵循 ShellCheck 最佳实践
-- 添加必要的注释和文档
-- 确保在标准 Termux 环境下可运行
-- 测试您的更改不会破坏现有功能
-
----
-
-## 更新日志
-
-### v2.0 (当前版本)
-
-- ✨ 添加命令行选项支持（--verbose, --dry-run, --uninstall）
-- ✨ 改进错误处理和日志系统
-- ✨ 优化依赖检查和安装流程
-- 🐛 修复 Logger 路径补丁验证失败的问题
-- 🐛 修复剪贴板模块补丁应用失败的问题
-- 📝 完善文档和帮助信息
-
-### v1.0 (初始版本)
-
-- ✨ 基础一键安装功能
-- ✨ 依赖检查和安装
-- ✨ Android 兼容性补丁
-- ✨ tmux 后台运行支持
-- ✨ 基础别名命令
-
----
-
-## 许可证
-
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
-
----
-
-## 致谢
-
-- [Openclaw](https://github.com/openclaw/openclaw) - 核心项目
-- [Termux](https://termux.com/) - 强大的 Android 终端模拟器
-- Google Gemini
-- 所有贡献者和使用者的反馈与支持
-
----
-
-## 联系方式
-
-- **项目主页**：[GitHub Repository](https://github.com/hillerliao/install-openclaw-on-termux)
-- **问题反馈**：[GitHub Issues](https://github.com/hillerliao/install-openclaw-on-termux/issues)
-- **邮箱**：riao@zhihai.me
-- **微信群**：
-
-    ![OpenClaw-Termux-WeChat-Group-QRCode](./sources/OpenClaw-Termux-Group.png)
-
----
-
-## 赞助支持
-
-如果您觉得这个项目对您有帮助，欢迎通过以下方式支持：
-
-- ⭐ 给项目一个 Star
-- 🐛 报告问题或提出建议
-- 💡 分享您的使用经验
-- 💰 赞助项目发展（可选）
-
----
-
-<div align="center">
-
-**如果这个项目对您有帮助，请给一个 ⭐️ Star**
-
-Made with ❤️ by the Openclaw Community
-
-</div>
+请在 [Issues](https://github.com/qq892601987/install-openclaw-on-termux/issues) 提供所用脚本、Android/Termux 版本、架构、Node/OpenClaw 版本、复现命令和已脱敏的错误日志。
