@@ -25,7 +25,6 @@ OPENCLAW_SPECIFIC_VERSION=""
 
 DEFAULT_PORT=18789
 DEFAULT_AUTO_START="y"
-MIN_NODE_MAJOR=22
 UPDATE_FLAG="$HOME/.pkg_last_update"
 TMP_DIR="$HOME/tmp"
 NPM_REGISTRY_URL="https://registry.npmmirror.com"
@@ -37,6 +36,7 @@ TOKEN=""
 AUTO_START=""
 DEPENDENCY_INSTALL_PENDING=0
 OPENCLAW_INSTALL_PENDING=0
+CLI_PARSE_ACTIVE=1
 
 BASHRC="$HOME/.bashrc"
 NPM_GLOBAL="$HOME/.npm-global"
@@ -68,6 +68,9 @@ ensure_log_dir() {
 }
 
 log() {
+    if [ "$DRY_RUN" -eq 1 ] || [ "$CLI_PARSE_ACTIVE" -eq 1 ]; then
+        return 0
+    fi
     ensure_log_dir
     printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
 }
@@ -266,7 +269,7 @@ render_openclaw_env_content() {
 }
 
 openclaw_gateway_process_pattern() {
-    printf '%s' "$OPENCLAW_BASE_DIR/dist/entry.js gateway"
+    printf '%s' "$OPENCLAW_BASE_DIR/openclaw.mjs gateway"
 }
 
 find_openclaw_gateway_processes() {
@@ -317,7 +320,7 @@ render_openclaw_runtime_functions() {
 
     cat <<EOF
 _openclaw_runtime_gateway_pattern() {
-    printf '%s' '$OPENCLAW_BASE_DIR/dist/entry.js gateway'
+    printf '%s' '$OPENCLAW_BASE_DIR/openclaw.mjs gateway'
 }
 
 _openclaw_runtime_stop_gateway_service() {
@@ -328,13 +331,24 @@ _openclaw_runtime_stop_gateway_service() {
         tmux kill-session -t openclaw 2>/dev/null || true
     fi
     if command -v pkill >/dev/null 2>&1; then
-        pkill -f "$gateway_pattern" 2>/dev/null || true
+        pkill -f "\$gateway_pattern" 2>/dev/null || true
         sleep 1
-        if command -v pgrep >/dev/null 2>&1 && pgrep -f "$gateway_pattern" >/dev/null 2>&1; then
-            pkill -9 -f "$gateway_pattern" 2>/dev/null || true
+        if command -v pgrep >/dev/null 2>&1 && pgrep -f "\$gateway_pattern" >/dev/null 2>&1; then
+            pkill -9 -f "\$gateway_pattern" 2>/dev/null || true
         fi
     fi
     sleep 1
+}
+
+_openclaw_runtime_wait_for_health() {
+    local attempt
+    for ((attempt=1; attempt<=30; attempt++)); do
+        if curl --fail --silent --max-time 2 "http://127.0.0.1:\${OPENCLAW_PORT:-$PORT}/healthz" >/dev/null; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
 }
 
 ocr() {
@@ -347,12 +361,12 @@ ocr() {
     export TMPDIR="\${TMPDIR:-$TMP_DIR}"
     _openclaw_runtime_stop_gateway_service
     tmux new-session -d -s openclaw "\$gateway_cmd" || return \$?
-    sleep 2
-    if tmux has-session -t openclaw 2>/dev/null; then
-        echo "✅ OpenClaw 服务已启动"
+    if _openclaw_runtime_wait_for_health; then
+        echo "✅ OpenClaw Gateway HTTP 健康检查通过（不代表模型功能可用）"
         echo "浏览器访问: http://localhost:\${OPENCLAW_PORT:-$PORT}/?token=\$OPENCLAW_GATEWAY_TOKEN"
     else
-        echo "❌ 服务启动失败，请检查 $LOG_DIR/runtime.log"
+        echo "❌ Gateway HTTP 健康检查超时，请检查 $LOG_DIR/runtime.log" >&2
+        return 1
     fi
 }
 
@@ -446,9 +460,6 @@ confirm_with_default() {
     printf '%s' "$normalized_choice"
 }
 
-get_node_major_version() {
-    node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1
-}
 
 is_openclaw_installed() {
     [ -d "$OPENCLAW_BASE_DIR" ] || [ -f "$OPENCLAW_BIN" ]
@@ -456,18 +467,35 @@ is_openclaw_installed() {
 
 get_openclaw_local_version() {
     local package_json="$OPENCLAW_BASE_DIR/package.json"
-
-    if [ ! -f "$package_json" ]; then
-        return 1
-    fi
-
-    grep -oE '"version"[[:space:]]*:[[:space:]]*"[^"]+"' "$package_json" 2>/dev/null \
-        | head -n 1 \
-        | sed -E 's/.*"([^"]+)"/\1/'
+    [ -f "$package_json" ] || return 1
+    node -e 'const p=require(process.argv[1]); if (typeof p.version !== "string") process.exit(1); console.log(p.version)' "$package_json"
 }
 
 get_openclaw_latest_version() {
-    npm view "$OPENCLAW_PACKAGE" version 2>/dev/null || true
+    npm view "$OPENCLAW_PACKAGE" version --json 2>/dev/null |
+        node -e 'let s="";process.stdin.on("data",v=>s+=v).on("end",()=>{try{const v=JSON.parse(s);if(typeof v!=="string"||!v)process.exit(1);console.log(v)}catch{process.exit(1)}})'
+}
+
+validate_openclaw_engine() {
+    local version="$1"
+    local engine=""
+    local node_version=""
+
+    [ -n "$version" ] || { die "无法确认 OpenClaw 版本，无法校验 Node.js 要求"; return $?; }
+    engine=$(npm view "${OPENCLAW_PACKAGE}@${version}" engines.node --json 2>/dev/null |
+        node -e 'let s="";process.stdin.on("data",v=>s+=v).on("end",()=>{try{const v=JSON.parse(s);if(typeof v!=="string"||!v)process.exit(1);console.log(v)}catch{process.exit(1)}})') || {
+        die "无法获取 OpenClaw $version 的 engines.node 元数据；请检查网络或 npm registry"
+        return $?
+    }
+    node_version=$(node --version 2>/dev/null) || {
+        die "无法读取 Node.js 版本；OpenClaw $version 要求 $engine"
+        return $?
+    }
+    if ! npm exec --yes --package=semver@7 -- semver -r "$engine" "$node_version" >/dev/null 2>&1; then
+        die "Node.js $node_version 不满足 OpenClaw $version 要求 ${engine}（或无法运行 semver 校验）；请安装满足要求的 Node.js，必要时使用 proot"
+        return $?
+    fi
+    info "OpenClaw $version 要求 Node.js ${engine}；当前 $node_version 已通过校验"
 }
 
 list_openclaw_versions() {
@@ -487,48 +515,78 @@ versions.forEach((v, i) => {
     success "共 $(echo "$versions" | node -e 'console.log(JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")).length)') 个版本"
 }
 
-install_openclaw_package() {
-    log "安装/更新 OpenClaw 包"
-    OPENCLAW_INSTALL_PENDING=1
-    local install_version="$OPENCLAW_TARGET_VERSION"
-    if [ -n "$OPENCLAW_SPECIFIC_VERSION" ]; then
-        install_version="$OPENCLAW_SPECIFIC_VERSION"
+is_managed_openclaw_wrapper() {
+    [ -f "$OPENCLAW_BIN" ] && [ ! -L "$OPENCLAW_BIN" ] || return 1
+    node -e '
+const fs = require("fs");
+const [bin, base] = process.argv.slice(1);
+const lines = fs.readFileSync(bin, "utf8").replace(/\r?\n$/, "").split(/\r?\n/);
+if (lines.length !== 2 || !/^#!\/.+\/sh$/.test(lines[0]) ||
+    ![base + "/dist/entry.js", base + "/openclaw.mjs"].some(p => lines[1] === `exec node "${p}" "$@"` || lines[1] === `exec node ${p} "$@"`)) process.exit(1);
+' "$OPENCLAW_BIN" "$OPENCLAW_BASE_DIR" 2>/dev/null
+}
+
+remove_legacy_openclaw_wrapper_for_install() {
+    if [ -L "$OPENCLAW_BIN" ] || { [ ! -e "$OPENCLAW_BIN" ] && [ ! -L "$OPENCLAW_BIN" ]; }; then
+        return 0
     fi
-    run_cmd env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g "${OPENCLAW_PACKAGE}@${install_version}" --ignore-scripts || {
-        die "OpenClaw 安装/更新失败"
+    if ! is_managed_openclaw_wrapper; then
+        die "检测到非本脚本管理的 openclaw 可执行文件，拒绝覆盖：$OPENCLAW_BIN"
+        return $?
+    fi
+    run_cmd rm -- "$OPENCLAW_BIN" || {
+        die "无法移除旧 openclaw 包装脚本：$OPENCLAW_BIN"
         return $?
     }
-    return 0
+}
+
+install_openclaw_package() {
+    local install_version="$OPENCLAW_TARGET_VERSION"
+    [ -n "$install_version" ] && [ "$install_version" != "latest" ] || {
+        die "必须先确定 OpenClaw 的具体版本，才能安装"
+        return $?
+    }
+    validate_openclaw_engine "$install_version" || return $?
+    remove_legacy_openclaw_wrapper_for_install || return $?
+    log "安装/更新 OpenClaw $install_version"
+    OPENCLAW_INSTALL_PENDING=1
+    run_cmd env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g "${OPENCLAW_PACKAGE}@${install_version}" --ignore-scripts || {
+        die "OpenClaw 安装失败；Android 原生平台若不受支持，请改用 proot Linux 环境，不要用假模块替代"
+        return $?
+    }
+    if [ "$DRY_RUN" -eq 1 ]; then
+        warn "dry-run 下跳过 OpenClaw postinstall 执行"
+        return 0
+    fi
+    if [ ! -f "$OPENCLAW_BASE_DIR/package.json" ]; then
+        die "安装后缺少 OpenClaw package.json：$OPENCLAW_BASE_DIR"
+        return $?
+    fi
+    local actual_version=""
+    actual_version=$(get_openclaw_local_version) || {
+        die "无法读取安装后的 OpenClaw 版本"
+        return $?
+    }
+    [ "$actual_version" = "$install_version" ] || {
+        die "安装版本与目标不符：期望 ${install_version}，实际 $actual_version"
+        return $?
+    }
+    (cd "$OPENCLAW_BASE_DIR" && npm run postinstall --if-present --ignore-scripts) || {
+        die "OpenClaw postinstall 失败；Android 原生依赖可能不兼容，请改用 proot Linux 环境"
+        return $?
+    }
 }
 
 ensure_openclaw_dist_layout() {
     if [ "$DRY_RUN" -eq 1 ] && [ "$OPENCLAW_INSTALL_PENDING" -eq 1 ]; then
-        warn "dry-run 下跳过 OpenClaw dist 目录校验"
+        warn "dry-run 下跳过 OpenClaw 入口文件校验"
         return 0
     fi
-
-    if [ ! -d "$OPENCLAW_BASE_DIR" ]; then
-        die "OpenClaw 安装目录不存在：$OPENCLAW_BASE_DIR"
+    if [ ! -f "$OPENCLAW_BASE_DIR/openclaw.mjs" ]; then
+        die "OpenClaw 官方入口 openclaw.mjs 不存在；请检查安装包，Android 不兼容时改用 proot"
         return $?
     fi
-
-    if [ -f "$OPENCLAW_BASE_DIR/dist/entry.js" ]; then
-        success "✅ OpenClaw 入口文件已就绪"
-        return 0
-    fi
-
-    warn "检测到 dist/entry.js 缺失，尝试执行构建..."
-    if [ -f "$OPENCLAW_BASE_DIR/tsconfig.json" ]; then
-        run_cmd sh -c "cd '$OPENCLAW_BASE_DIR' && npx tsc --skipLibCheck" || true
-    fi
-    run_cmd sh -c "cd '$OPENCLAW_BASE_DIR' && npm run build" || true
-
-    if [ ! -f "$OPENCLAW_BASE_DIR/dist/entry.js" ]; then
-        die "OpenClaw 安装后缺少 dist/entry.js，后续阶段无法继续"
-        return $?
-    fi
-
-    success "✅ OpenClaw dist 目录已就绪"
+    success "✅ OpenClaw 官方入口文件已就绪"
 }
 
 maybe_update_existing_openclaw() {
@@ -536,46 +594,32 @@ maybe_update_existing_openclaw() {
     local latest_version="$2"
     local update_choice="n"
 
-    # 如果用户指定了具体版本，直接安装
     if [ -n "$OPENCLAW_SPECIFIC_VERSION" ]; then
         info "指定版本: $OPENCLAW_SPECIFIC_VERSION"
         if [ -n "$installed_version" ] && [ "$installed_version" != "$OPENCLAW_SPECIFIC_VERSION" ]; then
-            warn "⚠️  版本降级: ${installed_version} -> $OPENCLAW_SPECIFIC_VERSION"
+            warn "⚠️  版本变更: ${installed_version} -> $OPENCLAW_SPECIFIC_VERSION"
         fi
+        OPENCLAW_TARGET_VERSION="$OPENCLAW_SPECIFIC_VERSION"
         install_openclaw_package || return $?
-        return 0
-    fi
-
-    if [ -z "$latest_version" ]; then
-        warn "无法获取 OpenClaw 最新版本信息，保留当前版本：${installed_version:-unknown}"
         return 0
     fi
 
     info "当前版本: ${installed_version:-unknown}"
     info "最新版本: $latest_version"
-
     if [ -n "$installed_version" ] && [ "$installed_version" = "$latest_version" ] && [ "$FORCE_UPDATE" -eq 0 ]; then
         success "✅ OpenClaw 已是最新版本 $installed_version"
         return 0
     fi
-
-    # 检测版本降级情况
-    if [ -n "$installed_version" ] && [ "$FORCE_UPDATE" -eq 0 ]; then
-        warn "⚠️  检测到版本变更"
-    fi
-
     if [ "$FORCE_UPDATE" -eq 1 ]; then
-        warn "检测到 --update，直接执行更新"
+        warn "检测到 --update，安装已解析的目标版本"
         install_openclaw_package || return $?
         return 0
     fi
-
     update_choice=$(confirm_with_default "是否更新到新版本? (y/n) [默认: y]: " "y")
     if [ "$update_choice" != "y" ]; then
         warn "跳过更新，保留当前版本"
         return 0
     fi
-
     install_openclaw_package || return $?
 }
 
@@ -663,79 +707,26 @@ patch_hardcoded_npm_path() {
     success "✅ /bin/npm 路径已替换为 $real_npm"
 }
 
-apply_clipboard_stub() {
-    local clip_file="$OPENCLAW_BASE_DIR/node_modules/@mariozechner/clipboard/index.js"
-    local clip_stub='module.exports = { availableFormats:()=>[], getText:()=>"", setText:()=>false, hasText:()=>false, getImageBinary:()=>null, getImageBase64:()=>null, setImageBinary:()=>false, setImageBase64:()=>false, hasImage:()=>false, getHtml:()=>"", setHtml:()=>false, hasHtml:()=>false, getRtf:()=>"", setRtf:()=>false, hasRtf:()=>false, clear:()=>{}, watch:()=>({stop:()=>{}}), callThreadsafeFunction:()=>{} };'
-
-    if [ ! -f "$clip_file" ]; then
-        log "clipboard 模块文件不存在，跳过 stub"
-        return 0
-    fi
-
-    warn "正在应用 clipboard stub..."
-    write_text_file "$clip_file" "$clip_stub" || {
-        die "clipboard stub 写入失败"
-        return $?
-    }
-
-    if [ "$DRY_RUN" -eq 1 ]; then
-        warn "dry-run 下跳过 clipboard stub 校验"
-        return 0
-    fi
-
-    if ! grep -q "availableFormats" "$clip_file"; then
-        die "clipboard stub 校验失败"
+reject_legacy_native_stubs() {
+    local koffi_file="$OPENCLAW_BASE_DIR/node_modules/koffi/index.js"
+    local clipboard_file="$OPENCLAW_BASE_DIR/node_modules/@mariozechner/clipboard/index.js"
+    local lancedb_file="$OPENCLAW_BASE_DIR/node_modules/@lancedb/lancedb/index.js"
+    if { [ -f "$koffi_file" ] && grep -Fq 'Koffi stub for android-arm64' "$koffi_file"; } ||
+        { [ -f "$clipboard_file" ] && grep -Fq 'module.exports = { availableFormats:()=>[]' "$clipboard_file"; } ||
+        { [ -f "$lancedb_file" ] && grep -Fq '@lancedb/lancedb stub for android-arm64' "$lancedb_file"; }; then
+        die "检测到旧安装脚本留下的假原生模块；请重新安装官方包，Android 原生不兼容时改用 proot Linux"
         return $?
     fi
-
-    success "✅ clipboard stub 已应用"
-}
-
-apply_koffi_stub() {
-    local koffi_dir="$OPENCLAW_BASE_DIR/node_modules/koffi"
-    local koffi_file="$koffi_dir/index.js"
-    local koffi_stub=""
-
-    if [ ! -d "$koffi_dir" ]; then
-        log "koffi 目录不存在，跳过 stub"
-        return 0
-    fi
-
-    koffi_stub=$(cat <<'EOF'
-// Koffi stub for android-arm64 — native module not available on this platform.
-// koffi is only used by pi-tui for Windows VT input (enableWindowsVTInput),
-// which is guarded by process.platform !== "win32" and never executes here.
-const handler = {
-  get(_, prop) {
-    if (prop === '__esModule') return false;
-    if (prop === 'default') return proxy;
-    if (prop === 'then') return undefined;
-    return function() { throw new Error('koffi stub: not available on android-arm64'); };
-  }
-};
-const proxy = new Proxy({}, handler);
-module.exports = proxy;
-module.exports.default = proxy;
-EOF
-)
-
-    warn "正在应用 koffi stub..."
-    write_text_file "$koffi_file" "$koffi_stub" || {
-        die "koffi stub 写入失败"
-        return $?
-    }
-
-    success "✅ koffi stub 已应用"
 }
 
 create_openclaw_wrapper() {
     local termux_prefix="${PREFIX:-/data/data/com.termux/files/usr}"
     local shell_path="$termux_prefix/bin/sh"
-    local entry_js="$OPENCLAW_BASE_DIR/dist/entry.js"
+    local entry_js="$OPENCLAW_BASE_DIR/openclaw.mjs"
     local wrapper_content=""
 
     if [ ! -f "$entry_js" ]; then
-        die "OpenClaw 入口文件不存在，无法创建包装脚本：$entry_js"
+        die "OpenClaw 官方入口不存在，无法创建包装脚本：$entry_js"
         return $?
     fi
 
@@ -752,6 +743,16 @@ exec node "$entry_js" "\$@"
 EOF
 )
 
+    if [ -L "$OPENCLAW_BIN" ]; then
+        run_cmd rm -- "$OPENCLAW_BIN" || {
+            die "无法移除 npm 创建的 openclaw 符号链接：$OPENCLAW_BIN"
+            return $?
+        }
+    fi
+    if [ -e "$OPENCLAW_BIN" ] && [ ! -L "$OPENCLAW_BIN" ] && ! is_managed_openclaw_wrapper; then
+        die "检测到非本脚本管理的 openclaw 可执行文件，拒绝覆盖：$OPENCLAW_BIN"
+        return $?
+    fi
     write_text_file "$OPENCLAW_BIN" "$wrapper_content" || {
         die "openclaw 包装脚本写入失败：$OPENCLAW_BIN"
         return $?
@@ -764,46 +765,6 @@ EOF
     success "✅ openclaw 包装脚本已创建"
 }
 
-fix_openclaw_shebang() {
-    local termux_prefix="${PREFIX:-/data/data/com.termux/files/usr}"
-    local first_line=""
-
-    if [ ! -f "$OPENCLAW_BIN" ]; then
-        log "openclaw 可执行文件不存在，跳过 shebang 修复"
-        return 0
-    fi
-
-    if [ -x "/usr/bin/env" ]; then
-        log "/usr/bin/env 可用，无需修复 shebang"
-        return 0
-    fi
-
-    first_line=$(head -n 1 "$OPENCLAW_BIN" 2>/dev/null || true)
-    case "$first_line" in
-        '#!/usr/bin/env'*) ;;
-        *)
-            log "openclaw shebang 无需修复"
-            return 0
-            ;;
-    esac
-
-    if [ ! -x "$termux_prefix/bin/env" ]; then
-        warn "Termux env 路径不存在，跳过 shebang 修复：$termux_prefix/bin/env"
-        return 0
-    fi
-
-    run_cmd sed -i "1s|#!/usr/bin/env|#!${termux_prefix}/bin/env|" "$OPENCLAW_BIN" || {
-        die "openclaw shebang 修复失败"
-        return $?
-    }
-
-    if [ "$DRY_RUN" -eq 1 ]; then
-        warn "dry-run 下跳过 shebang 修复结果校验"
-        return 0
-    fi
-
-    success "✅ openclaw shebang 已修复为 Termux 兼容路径"
-}
 
 check_dependency_available() {
     local dep="$1"
@@ -858,7 +819,7 @@ maybe_refresh_pkg_index() {
 }
 
 maybe_install_missing_dependencies() {
-    local deps=("nodejs-lts" "git" "openssh" "tmux" "termux-api" "termux-tools" "cmake" "python" "golang" "which" "clang" "ninja" "pkg-config" "build-essential")
+    local deps=("nodejs-lts" "git" "openssh" "tmux" "curl" "termux-api" "termux-tools" "cmake" "python" "golang" "which" "clang" "ninja" "pkg-config" "build-essential")
     local missing_deps=()
     local dep
 
@@ -887,9 +848,6 @@ maybe_install_missing_dependencies() {
 }
 
 check_node_version() {
-    local node_major=""
-    local downgrade_choice="n"
-    local continue_choice="n"
 
     if ! command -v node >/dev/null 2>&1; then
         die "未检测到 node，可执行文件缺失"
@@ -902,46 +860,25 @@ check_node_version() {
 
     info "Node.js 版本: $(node -v 2>/dev/null || echo '未知')"
     info "NPM 版本: $(npm -v 2>/dev/null || echo '未知')"
+    info "目标版本的完整 Node.js 要求将在确定安装或保留的 OpenClaw 版本后校验。"
 
-    node_major=$(get_node_major_version)
-    if [ -z "$node_major" ] || [ "$node_major" -lt "$MIN_NODE_MAJOR" ]; then
-        die "Node.js 版本必须 >= ${MIN_NODE_MAJOR}，当前版本：$(node -v 2>/dev/null || echo '未知')"
-        return $?
-    fi
+}
 
-    if [ "$node_major" -eq 25 ]; then
-        warn "⚠️ 检测到 Node.js 25（非 LTS），可能存在原生模块兼容性问题"
-        if [ "$NON_INTERACTIVE" -eq 1 ]; then
-            warn "非交互模式下不会自动降级 Node.js，请确认当前版本兼容"
-            return 0
+is_exact_openclaw_version() {
+    local version="$1"
+    local prerelease=""
+    local identifier=""
+    local -a identifiers=()
+    [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] || return 1
+    prerelease="${version%%+*}"
+    [[ "$prerelease" == *-* ]] || return 0
+    prerelease="${prerelease#*-}"
+    IFS='.' read -r -a identifiers <<< "$prerelease"
+    for identifier in "${identifiers[@]}"; do
+        if [[ "$identifier" =~ ^[0-9]+$ ]] && [[ "$identifier" == 0[0-9]* ]]; then
+            return 1
         fi
-
-        downgrade_choice=$(confirm_with_default "是否降级到 Node.js 24 LTS? (y/n) [默认: y]: " "y")
-        if [ "$downgrade_choice" = "y" ]; then
-            run_cmd pkg uninstall nodejs -y || {
-                die "Node.js 卸载失败"
-                return $?
-            }
-            run_cmd pkg install nodejs-lts -y || {
-                die "Node.js LTS 安装失败"
-                return $?
-            }
-            if [ "$DRY_RUN" -eq 1 ]; then
-                success "✅ 已模拟切换到 Node.js 24 LTS"
-                return 0
-            fi
-            success "✅ Node.js 已切换为 $(node -v 2>/dev/null || echo '未知')"
-            return 0
-        fi
-
-        continue_choice=$(confirm_with_default "继续使用 Node.js 25 安装? (y/n) [默认: n]: " "n")
-        if [ "$continue_choice" != "y" ]; then
-            die "已取消安装，请先切换到兼容的 Node.js LTS 版本" 2
-            return $?
-        fi
-    fi
-
-    success "✅ Node.js 版本检查通过"
+    done
 }
 
 parse_args() {
@@ -994,6 +931,7 @@ parse_args() {
                 ;;
             --version=*|-V=*)
                 OPENCLAW_SPECIFIC_VERSION="${1#*=}"
+                [ -n "$OPENCLAW_SPECIFIC_VERSION" ] || { die "--version 需要一个具体版本"; return $?; }
                 ;;
             --list-versions)
                 LIST_VERSIONS=1
@@ -1005,7 +943,10 @@ parse_args() {
         esac
         shift
     done
-
+    if [ -n "$OPENCLAW_SPECIFIC_VERSION" ] && ! is_exact_openclaw_version "$OPENCLAW_SPECIFIC_VERSION"; then
+        die "--version 必须是具体的有效 SemVer 版本，不能使用标签或范围：$OPENCLAW_SPECIFIC_VERSION"
+        return $?
+    fi
     return 0
 }
 
@@ -1164,7 +1105,11 @@ show_phase2_summary() {
     printf '  - Token: %s\n' "$(mask_token "$TOKEN")"
     printf '  - 自启动: %s\n' "$AUTO_START"
     printf '  - 模式: %s\n' "$mode_label"
-    warn "接下来将继续执行安装、补丁、shell 集成、服务启动与 onboard 引导。"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        warn "dry-run 仅展示计划，实际安装/服务/模型可用性均未验证。"
+    else
+        warn "接下来将继续执行安装、兼容处理、shell 集成、服务启动与 onboard 引导。"
+    fi
 }
 
 check_deps() {
@@ -1245,24 +1190,40 @@ install_or_update_openclaw() {
     fi
 
     installed_version=$(get_openclaw_local_version 2>/dev/null || true)
-    latest_version=$(get_openclaw_latest_version)
+    if [ -n "$OPENCLAW_SPECIFIC_VERSION" ]; then
+        if ! [[ "$OPENCLAW_SPECIFIC_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] ||
+            [ "$(npm exec --yes --package=semver@7 -- semver "$OPENCLAW_SPECIFIC_VERSION" 2>/dev/null)" != "$OPENCLAW_SPECIFIC_VERSION" ]; then
+            die "--version 必须是精确的有效 SemVer 版本，而非标签或范围：$OPENCLAW_SPECIFIC_VERSION"
+            return $?
+        fi
+        OPENCLAW_TARGET_VERSION="$OPENCLAW_SPECIFIC_VERSION"
+    else
+        latest_version=$(get_openclaw_latest_version) || {
+            die "无法解析 OpenClaw latest 的具体版本；请检查网络或 npm registry"
+            return $?
+        }
+        OPENCLAW_TARGET_VERSION="$latest_version"
+    fi
 
     if is_openclaw_installed; then
         maybe_update_existing_openclaw "$installed_version" "$latest_version" || return $?
     else
-        warn "未检测到已安装的 OpenClaw，准备首次安装"
+        warn "未检测到已安装的 OpenClaw，准备首次安装 $OPENCLAW_TARGET_VERSION"
         install_openclaw_package || return $?
     fi
 
-    installed_version=$(get_openclaw_local_version 2>/dev/null || true)
-    if [ -n "$installed_version" ]; then
-        success "✅ OpenClaw 当前版本: $installed_version"
-    elif [ "$DRY_RUN" -eq 1 ] && [ "$OPENCLAW_INSTALL_PENDING" -eq 1 ]; then
-        warn "dry-run 下跳过安装后版本读取"
-    else
-        warn "未能读取 OpenClaw 本地版本信息"
+    if [ "$DRY_RUN" -eq 1 ] && [ "$OPENCLAW_INSTALL_PENDING" -eq 1 ]; then
+        warn "dry-run 下跳过安装后版本读取与入口文件校验"
+        return 0
     fi
-
+    installed_version=$(get_openclaw_local_version) || {
+        die "无法读取 OpenClaw 已安装版本；请修复安装后重试"
+        return $?
+    }
+    if [ "$OPENCLAW_INSTALL_PENDING" -eq 0 ]; then
+        validate_openclaw_engine "$installed_version" || return $?
+    fi
+    success "✅ OpenClaw 当前版本: $installed_version"
     ensure_openclaw_dist_layout || return $?
 }
 
@@ -1285,12 +1246,10 @@ apply_patches() {
         return $?
     fi
 
+    reject_legacy_native_stubs || return $?
     patch_tmp_openclaw_paths || return $?
     patch_hardcoded_npm_path || return $?
-    apply_clipboard_stub || return $?
-    apply_koffi_stub || return $?
     create_openclaw_wrapper || return $?
-    fix_openclaw_shebang || return $?
 
     success "✅ Termux 兼容补丁已处理完成"
 }
@@ -1353,6 +1312,17 @@ setup_shell_integration() {
     success "✅ shell 集成与运行环境已写入"
 }
 
+wait_for_gateway_health() {
+    local attempt
+    for ((attempt=1; attempt<=30; attempt++)); do
+        if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
 start_service() {
     local restart_choice="y"
     local running_process=""
@@ -1396,7 +1366,11 @@ start_service() {
         warn "检测到已有 OpenClaw 实例在运行"
         restart_choice=$(confirm_with_default "是否停止旧实例并启动新实例? (y/n) [默认: y]: " "y")
         if [ "$restart_choice" != "y" ]; then
-            warn "保留当前实例运行，跳过启动"
+            if ! wait_for_gateway_health; then
+                die "已有 Gateway 的 HTTP 健康检查超时（http://127.0.0.1:$PORT/healthz）；请检查 $LOG_DIR/runtime.log"
+                return $?
+            fi
+            success "✅ Gateway HTTP 健康检查通过（不代表模型功能可用）"
             return 0
         fi
 
@@ -1419,13 +1393,11 @@ start_service() {
         return $?
     }
 
-    sleep 2
-    if ! tmux has-session -t openclaw 2>/dev/null; then
-        die "tmux 会话启动后立即退出，请检查 $LOG_DIR/runtime.log"
+    if ! wait_for_gateway_health; then
+        die "Gateway HTTP 健康检查超时（http://127.0.0.1:$PORT/healthz）；请检查 $LOG_DIR/runtime.log"
         return $?
     fi
-
-    success "✅ OpenClaw Gateway 服务已启动"
+    success "✅ OpenClaw Gateway HTTP 健康检查通过（不代表模型功能可用）"
     info "浏览器访问：http://localhost:$PORT/?token=$TOKEN"
 }
 
@@ -1582,6 +1554,7 @@ uninstall_openclaw() {
 main() {
     init_colors
     parse_args "$@" || return $?
+    CLI_PARSE_ACTIVE=0
 
     if [ "$SHOW_HELP" -eq 1 ]; then
         show_help
@@ -1607,6 +1580,12 @@ main() {
 
     collect_inputs || return $?
     show_phase2_summary
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[DRY-RUN] 将解析 ${OPENCLAW_PACKAGE}@${OPENCLAW_SPECIFIC_VERSION:-latest} 的具体版本及 engines.node 要求，检查 Node.js 完整版本"
+        info "[DRY-RUN] 将安装/保留包、执行官方 postinstall、创建安全包装脚本和 shell 服务助手"
+        info "[DRY-RUN] 将以 http://127.0.0.1:$PORT/healthz 检查 Gateway HTTP 就绪；未执行网络查询或修改 HOME"
+        return 0
+    fi
 
     check_deps || return $?
     configure_npm || return $?

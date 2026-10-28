@@ -31,7 +31,6 @@
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     _NEED_PROMPT=1
 fi
-trap 'if [ "$_NEED_PROMPT" = "1" ]; then echo ""; echo "⚠️  请执行以下命令使别名（ocr-重启、ockill-强制关闭、oclog-查看日志）生效:"; echo "   source ~/.bashrc"; fi' EXIT
 
 # 解析命令行选项
 VERBOSE=0
@@ -58,10 +57,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --version|-V)
-            TARGET_VERSION="$2"
-            if [ -z "$TARGET_VERSION" ]; then
-                echo "错误: --version 需要指定版本号"
-                echo "用法: $0 --version <版本号>"
+            TARGET_VERSION="${2:-}"
+            if ! [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+                echo "错误: --version 需要精确版本号（如 2026.10.8）" >&2
                 exit 1
             fi
             shift 2
@@ -86,6 +84,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+if [ "$DRY_RUN" -eq 0 ] && [ "$_NEED_PROMPT" = 1 ]; then
+    trap 'echo ""; echo "请执行 source ~/.bashrc 使 ocr/ockill/oclog 生效"' EXIT
+fi
 
 trap 'echo -e "${RED}错误：脚本执行失败，请检查上述输出${NC}"' ERR
 
@@ -123,13 +124,29 @@ NPM_GLOBAL="$HOME/.npm-global"
 NPM_BIN="$NPM_GLOBAL/bin"
 LOG_DIR="$HOME/openclaw-logs"
 LOG_FILE="$LOG_DIR/install.log"
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[DRY-RUN] 不修改 HOME、npm 包、配置或服务；目标版本：${TARGET_VERSION:-latest（正式安装时解析并固定一次）}"
+    if [ "$UNINSTALL" -eq 1 ]; then
+        echo "[DRY-RUN] 将卸载 OpenClaw 并清理配置"
+    else
+        echo "[DRY-RUN] 将读取 npm 的具体版本与 engines.node，并验证 Node.js 完整版本"
+        echo "[DRY-RUN] 若需替换：npm i -g openclaw@<解析后的版本> --ignore-scripts"
+        echo "[DRY-RUN] 在包目录运行 npm run postinstall --if-present --ignore-scripts，创建安全包装脚本并检查 Gateway /healthz"
+    fi
+    [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 0 || return 0
+fi
 
-# 创建日志目录（防止日志函数在目录不存在时报错）
-mkdir -p "$LOG_DIR" 2>/dev/null || true
+if [ -z "${PREFIX:-}" ] || [ ! -x "$PREFIX/bin/pkg" ]; then
+    echo "错误：请在原生 Termux 中运行此脚本；--help 和 --dry-run 可在其他环境查看。" >&2
+    [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 || return 1
+fi
+
+# 日志目录在实际执行时创建，dry-run 不写入文件
+if [ "$DRY_RUN" -eq 0 ]; then mkdir -p "$LOG_DIR"; fi
 
 # 日志函数
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"
+    if [ "$DRY_RUN" -eq 0 ]; then echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"; fi
 }
 
 # 命令执行函数（支持 dry-run）
@@ -148,79 +165,6 @@ run_cmd() {
 
 # Function definitions
 
-apply_koffi_stub() {
-    # Apply koffi stub for Termux compatibility (android-arm64)
-    # koffi is only used by pi-tui for Windows VT input, which never executes on Android
-    log "应用 koffi stub"
-    echo -e "${YELLOW}[2.5/6] 正在应用 koffi 兼容性修复...${NC}"
-    
-    KOFFI_DIR="$NPM_GLOBAL/lib/node_modules/openclaw/node_modules/koffi"
-    
-    if [ -d "$KOFFI_DIR" ]; then
-        cat > "$KOFFI_DIR/index.js" << 'EOF'
-// Koffi stub for android-arm64 — native module not available on this platform.
-// koffi is only used by pi-tui for Windows VT input (enableWindowsVTInput),
-// which is guarded by process.platform !== "win32" and never executes here.
-const handler = {
-  get(_, prop) {
-    if (prop === '__esModule') return false;
-    if (prop === 'default') return proxy;
-    if (prop === 'then') return undefined;
-    return function() { throw new Error('koffi stub: not available on android-arm64'); };
-  }
-};
-const proxy = new Proxy({}, handler);
-module.exports = proxy;
-module.exports.default = proxy;
-EOF
-        log "koffi stub 应用成功"
-        echo -e "${GREEN}✓ koffi stub 应用成功${NC}"
-    else
-        log "koffi 目录不存在，跳过 stub"
-    fi
-}
-
-apply_lancedb_stub() {
-    # Apply @lancedb/lancedb stub for Termux compatibility (android-arm64)
-    # lancedb native module does not support android platform
-    log "应用 lancedb stub"
-    echo -e "${YELLOW}正在应用 lancedb 兼容性修复...${NC}"
-    
-    LANCEDB_DIR="$NPM_GLOBAL/lib/node_modules/openclaw/node_modules/@lancedb/lancedb"
-    
-    if [ -d "$LANCEDB_DIR" ]; then
-        # Stub the native index.js
-        cat > "$LANCEDB_DIR/index.js" << 'EOF'
-// @lancedb/lancedb stub for android-arm64 — native module not available on this platform.
-// lancedb only supports darwin,linux,win32 with x64/arm64 CPUs.
-const handler = {
-  get(_, prop) {
-    if (prop === '__esModule') return true;
-    if (prop === 'default') return proxy;
-    if (prop === 'then') return undefined;
-    return function() { throw new Error('@lancedb/lancedb stub: not available on android-arm64'); };
-  }
-};
-const proxy = new Proxy({}, handler);
-module.exports = proxy;
-module.exports.default = proxy;
-EOF
-        # Also stub the native .node file if it exists (prevent dlopen crash)
-        if [ -d "$LANCEDB_DIR/linux-arm64" ]; then
-            rm -rf "$LANCEDB_DIR/linux-arm64" 2>/dev/null || true
-        fi
-        if [ -d "$LANCEDB_DIR/darwin-arm64" ]; then
-            rm -rf "$LANCEDB_DIR/darwin-arm64" 2>/dev/null || true
-        fi
-        if [ -d "$LANCEDB_DIR/win32-arm64" ]; then
-            rm -rf "$LANCEDB_DIR/win32-arm64" 2>/dev/null || true
-        fi
-        log "lancedb stub 应用成功"
-        echo -e "${GREEN}✓ lancedb stub 应用成功${NC}"
-    else
-        log "lancedb 目录不存在，跳过 stub"
-    fi
-}
 
 check_deps() {
     # Check and install basic dependencies
@@ -251,8 +195,8 @@ check_deps() {
         echo -e "${GREEN}包列表已是最新${NC}"
     fi
 
-    # 定义需要的基础包（包含编译工具，用于原生模块构建）
-    DEPS=("nodejs-lts" "git" "openssh" "tmux" "termux-api" "termux-tools" "cmake" "python" "golang" "which" "clang" "ninja" "pkg-config" "build-essential")
+    # curl 用于检测本地 Gateway 的 HTTP 就绪状态。
+    DEPS=("nodejs-lts" "git" "openssh" "tmux" "termux-api" "termux-tools" "curl" "cmake" "python" "golang" "which" "clang" "ninja" "pkg-config" "build-essential")
     MISSING_DEPS=()
 
     for dep in "${DEPS[@]}"; do
@@ -290,367 +234,153 @@ check_deps() {
     echo -e "${BLUE}Node.js 版本: $(node -v)${NC}"
     echo -e "${BLUE}NPM 版本: $(npm -v)${NC}" 
 
-    # 检查 Node.js 版本（必须 22 以上）
-    NODE_VERSION=$(node --version 2>/dev/null | sed 's/v//' | cut -d. -f1)
-    if [ -z "$NODE_VERSION" ] || [ "$NODE_VERSION" -lt 22 ]; then
-        log "Node.js 版本检查失败: $NODE_VERSION"
-        echo -e "${RED}错误：Node.js 版本必须 22 以上，当前版本: $(node --version 2>/dev/null || echo '未知')${NC}"
-        exit 1
-    fi
-    
-    # 警告：如果是 Node.js 25 (非 LTS)，提示可能遇到兼容性问题并提供降级选项
-    if [ "$NODE_VERSION" -eq 25 ]; then
-        log "警告：检测到 Node.js 25 (非 LTS 版本)"
-        echo -e "${YELLOW}⚠️  警告：当前使用 Node.js 25 (Current 版本)，可能遇到原生模块兼容性问题${NC}"
-        echo -e "${YELLOW}    建议降级到 Node.js 24 LTS 版本以获得更好的稳定性${NC}"
-        echo ""
-        read -p "是否降级到 Node.js 24 LTS? (y/n) [默认: y]: " DOWNGRADE_CHOICE
-        DOWNGRADE_CHOICE=${DOWNGRADE_CHOICE:-y}
-        
-        if [ "$DOWNGRADE_CHOICE" = "y" ] || [ "$DOWNGRADE_CHOICE" = "Y" ]; then
-            log "开始降级 Node.js 到 LTS 版本"
-            echo -e "${YELLOW}正在降级 Node.js 到 24 LTS...${NC}"
-            
-            # 先卸载当前版本的 Node.js
-            run_cmd pkg uninstall nodejs -y
-            if [ $? -ne 0 ]; then
-                log "Node.js 卸载失败"
-                echo -e "${RED}错误：Node.js 卸载失败${NC}"
-                exit 1
-            fi
-            
-            # 安装 Node.js LTS 版本
-            run_cmd pkg install nodejs-lts -y
-            if [ $? -ne 0 ]; then
-                log "Node.js LTS 安装失败"
-                echo -e "${RED}错误：Node.js LTS 安装失败${NC}"
-                exit 1
-            fi
-            
-            # 重新获取 Node.js 版本
-            NODE_VERSION=$(node --version 2>/dev/null | sed 's/v//' | cut -d. -f1)
-            echo -e "${GREEN}✅ Node.js 已降级到 $(node --version)${NC}"
-            log "Node.js 降级完成: $(node --version)"
-        else
-            log "用户选择继续使用 Node.js 25"
-            echo -e "${YELLOW}继续安装，但可能遇到兼容性问题${NC}"
-            read -p "是否继续? (y/n) [默认: n]: " CONTINUE_INSTALL
-            CONTINUE_INSTALL=${CONTINUE_INSTALL:-n}
-            if [ "$CONTINUE_INSTALL" != "y" ] && [ "$CONTINUE_INSTALL" != "Y" ]; then
-                log "用户选择退出安装"
-                echo -e "${YELLOW}已取消安装${NC}"
-                exit 0
-            fi
-        fi
-    fi
-    
-    log "Node.js 版本检查通过: $NODE_VERSION"
+    # 精确的 Node.js 要求由目标 OpenClaw 包的 engines.node 元数据决定。
+    command -v npm >/dev/null || { echo -e "${RED}错误：npm 不可用${NC}"; exit 1; }
 
     touch "$BASHRC" 2>/dev/null
+}
 
-    log "设置 NPM 镜像"
-    npm config set registry https://registry.npmmirror.com
-    if [ $? -ne 0 ]; then
-        log "NPM 镜像设置失败"
-        echo -e "${RED}错误：NPM 镜像设置失败${NC}"
-        exit 1
+package_version() {
+    node -p "require(process.argv[1]).version" "$1/package.json" 2>/dev/null
+}
+
+check_engine() {
+    local version="$1" range="$2" runtime
+    runtime=$(node -p 'process.version.slice(1)' 2>/dev/null) || return 1
+    if [ -z "$range" ] || [ "$range" = "undefined" ] ||
+       ! npm exec --yes --package=semver@7 -- semver -r "$range" "$runtime" >/dev/null 2>&1; then
+        echo -e "${RED}错误：OpenClaw $version 要求 Node.js ${range}，当前为 ${runtime}（或无法验证版本）。请安装符合要求的 Node.js；原生模块不支持 Android 时请使用 proot。${NC}" >&2
+        return 1
     fi
 }
 
-install_glibc() {
-    # Install glibc-runner for better compatibility
-    return 0
-    log "开始安装 glibc-runner"
-    echo -e "\n${YELLOW}[1.5/6] 正在安装 glibc-runner...${NC}"
-    
-    # Check if already installed
-    if [ -f "$HOME/.openclaw-android/.glibc-arch" ] && [ -x "$PREFIX/glibc/lib/ld-linux-aarch64.so.1" ]; then
-        echo -e "${GREEN}✓ glibc-runner 已安装${NC}"
-        log "glibc-runner 已安装，跳过"
-        return 0
-    fi
-    
-    # Install pacman if not present
-    if ! command -v pacman &>/dev/null; then
-        echo -e "${YELLOW}安装 pacman...${NC}"
-        run_cmd pkg install -y pacman
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}错误：pacman 安装失败${NC}"
-            log "pacman 安装失败"
-            exit 1
+wait_for_gateway() {
+    local attempt
+    for ((attempt=1; attempt<=30; attempt++)); do
+        if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null; then
+            return 0
         fi
-    fi
-    
-    # Initialize pacman keyring (may take time)
-    echo -e "${YELLOW}初始化 pacman keyring...${NC}"
-    run_cmd pacman-key --init 2>/dev/null || true
-    run_cmd pacman-key --populate 2>/dev/null || true
-    
-    # Install glibc-runner
-    echo -e "${YELLOW}安装 glibc-runner...${NC}"
-    run_cmd pacman -Sy glibc-runner --noconfirm --assume-installed bash,patchelf,resolv-conf
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}错误：glibc-runner 安装失败${NC}"
-        log "glibc-runner 安装失败"
-        exit 1
-    fi
-    
-    # Create marker file
-    mkdir -p "$HOME/.openclaw-android"
-    touch "$HOME/.openclaw-android/.glibc-arch"
-    
-    echo -e "${GREEN}✓ glibc-runner 安装成功${NC}"
-    log "glibc-runner 安装成功"
+        [ "$attempt" -eq 30 ] || sleep 2
+    done
+    return 1
+}
+
+is_managed_openclaw_wrapper() {
+    node -e '
+const fs = require("fs");
+const [bin, base] = process.argv.slice(1);
+const lines = fs.readFileSync(bin, "utf8").replace(/\r?\n$/, "").split(/\r?\n/);
+const entries = [base + "/dist/entry.js", base + "/openclaw.mjs"];
+if (lines.length !== 2 || !/^#!\/.+\/sh$/.test(lines[0]) ||
+    !entries.some(p => lines[1] === `exec node "${p}" "$@"` || lines[1] === `exec node ${p} "$@"`)) process.exit(1);
+' "$NPM_BIN/openclaw" "$BASE_DIR" 2>/dev/null
 }
 
 configure_npm() {
-    # Configure NPM environment and install Openclaw
-    log "开始配置 NPM"
-    echo -e "\n${YELLOW}[2/6] 正在配置 Openclaw...${NC}"
-
-    # 配置 NPM 全局环境
-    mkdir -p "$NPM_GLOBAL"
-    npm config set prefix "$NPM_GLOBAL"
-    if [ $? -ne 0 ]; then
-        log "NPM 前缀设置失败"
-        echo -e "${RED}错误：NPM 前缀设置失败${NC}"
-        exit 1
-    fi
-    # 检查是否已存在正确的 PATH 设置（避免重复追加）
-    if ! grep -q "export PATH=$NPM_BIN:" "$BASHRC" 2>/dev/null; then
-        echo "export PATH=$NPM_BIN:\$PATH" >> "$BASHRC"
-    fi
-    export PATH="$NPM_BIN:$PATH"
-
-    # 设置 Node.js 内存限制（避免大模型配置时内存不足）
-    if ! grep -q 'export NODE_OPTIONS="--max-old-space-size=2048"' "$BASHRC" 2>/dev/null; then
-        echo 'export NODE_OPTIONS="--max-old-space-size=2048"' >> "$BASHRC"
-    fi
-    export NODE_OPTIONS="--max-old-space-size=2048"
-
-    # 在安装前创建必要的目录（Termux 兼容性处理）
-    log "创建 Termux 兼容性目录"
-    mkdir -p "$LOG_DIR" "$HOME/tmp"
-    if [ $? -ne 0 ]; then
-        log "目录创建失败"
-        echo -e "${RED}错误：目录创建失败${NC}"
-        exit 1
-    fi
-
-    # 设置临时目录（node-gyp 编译需要）
-    export TMPDIR="$HOME/tmp"
-
-    # 配置 git 使用 HTTPS 替代 SSH（解决 Termux SSH 连接问题）
-    log "配置 git HTTPS"
-    git config --global url."https://github.com/".insteadOf "ssh://git@github.com/" 2>/dev/null || true
-    git config --global --add url."https://github.com/".insteadOf "git@github.com:" 2>/dev/null || true
-    echo -e "${GREEN}✓ git HTTPS 配置完成${NC}"
-
-    # 创建 GYP 配置（避免 node-gyp 找 Android NDK）
-    log "配置 GYP 环境"
-    mkdir -p "$HOME/.gyp"
-    echo "{'variables':{'android_ndk_path':''}}" > "$HOME/.gyp/include.gypi"
-    echo -e "${GREEN}✓ GYP 配置完成${NC}"
-
-    # 检查并安装/更新 Openclaw
-    # 如果用户未指定版本，默认使用 latest
-    if [ -z "$TARGET_VERSION" ]; then
-        TARGET_VERSION="latest"
-    fi
-    INSTALLED_VERSION=""
-    LATEST_VERSION=""
-    NEED_UPDATE=0
-
-    log "检查 Openclaw 安装状态"
-    if [ -f "$NPM_BIN/openclaw" ]; then
-        log "Openclaw 已安装，检查版本"
-        echo -e "${BLUE}检查 Openclaw 版本...${NC}"
-        INSTALLED_VERSION=$(npm list -g openclaw --depth=0 2>/dev/null | grep -oE 'openclaw@[0-9]+\.[0-9]+\.[0-9]+' | cut -d@ -f2)
-        if [ -z "$INSTALLED_VERSION" ]; then
-            log "版本提取失败，尝试备用方法"
-            INSTALLED_VERSION=$(npm view openclaw version 2>/dev/null || echo "unknown")
-        fi
-        echo -e "${BLUE}当前版本: $INSTALLED_VERSION${NC}"
-
-        # 获取最新版本
-        log "获取最新版本信息"
-        echo -e "${BLUE}正在从 npm 获取最新版本信息...${NC}"
-        LATEST_VERSION=$(npm view openclaw version 2>/dev/null || echo "")
-
-        if [ -z "$LATEST_VERSION" ]; then
-            log "无法获取最新版本信息"
-            echo -e "${YELLOW}⚠️  无法获取最新版本信息（可能是网络问题），保持当前版本${NC}"
-        else
-            echo -e "${BLUE}最新版本: $LATEST_VERSION${NC}"
-
-            # 判断是否需要更新（用户指定版本 或 检查最新版本）
-            NEED_UPDATE=0
-            if [ "$TARGET_VERSION" != "latest" ]; then
-                # 用户指定了特定版本
-                if [ "$INSTALLED_VERSION" != "$TARGET_VERSION" ]; then
-                    # 比较版本确定是升级还是降级（使用兼容性更好的方法）
-                    compare_versions() {
-                        local v1="$1" v2="$2"
-                        local IFS='.'
-                        local i ver1=($v1) ver2=($v2)
-                        for ((i=0; i<${#ver1[@]} || i<${#ver2[@]}; i++)); do
-                            local n1=${ver1[i]:-0} n2=${ver2[i]:-0}
-                            n1=${n1%%[^0-9]*} n2=${n2%%[^0-9]*}
-                            if [[ $n1 -gt $n2 ]]; then return 1; fi
-                            if [[ $n1 -lt $n2 ]]; then return 2; fi
-                        done
-                        return 0
-                    }
-                    compare_versions "$INSTALLED_VERSION" "$TARGET_VERSION"
-                    cmp_result=$?
-                    if [ $cmp_result -eq 1 ]; then
-                        # v1 > v2 = 当前版本 > 目标版本 = 降级
-                        log "降级到指定版本: $TARGET_VERSION (当前: $INSTALLED_VERSION)"
-                        echo -e "${YELLOW}🔄 降级到指定版本: $TARGET_VERSION (当前: $INSTALLED_VERSION)${NC}"
-                    else
-                        # v1 < v2 = 当前版本 < 目标版本 = 升级
-                        log "升级到指定版本: $TARGET_VERSION (当前: $INSTALLED_VERSION)"
-                        echo -e "${YELLOW}🔔 升级到指定版本: $TARGET_VERSION (当前: $INSTALLED_VERSION)${NC}"
-                    fi
-                    NEED_UPDATE=1
-                else
-                    log "版本已是指定版本"
-                    echo -e "${GREEN}✅ Openclaw 已是指定版本 $INSTALLED_VERSION${NC}"
-                fi
-            else
-                # 用户未指定版本，默认检查最新版本
-                if [ "$INSTALLED_VERSION" != "$LATEST_VERSION" ]; then
-                    log "发现新版本: $LATEST_VERSION (当前: $INSTALLED_VERSION)"
-                    echo -e "${YELLOW}🔔 发现新版本: $LATEST_VERSION (当前: $INSTALLED_VERSION)${NC}"
-                    NEED_UPDATE=1
-                fi
-            fi
-
-            if [ $NEED_UPDATE -eq 1 ]; then
-                if [ $FORCE_UPDATE -eq 1 ]; then
-                    log "强制更新模式，直接更新"
-                    echo -e "${YELLOW}正在更新 Openclaw 到 $TARGET_VERSION...${NC}"
-                    # 使用 --ignore-scripts 跳过原生模块编译（koffi/clipboard 在 Termux 上无法编译）
-                    run_cmd env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g openclaw@$TARGET_VERSION --ignore-scripts --force
-                    if [ $? -ne 0 ]; then
-                        log "Openclaw 更新失败"
-                        echo -e "${RED}错误：Openclaw 更新失败${NC}"
-                        exit 1
-                    fi
-                    log "Openclaw 更新完成"
-                    INSTALLED_VERSION=$(npm list -g openclaw --depth=0 2>/dev/null | grep -oE 'openclaw@[0-9]+\.[0-9]+\.[0-9]+' | cut -d@ -f2)
-                    echo -e "${GREEN}✅ Openclaw 已更新到 $INSTALLED_VERSION${NC}"
-                else
-                    if [ "$TARGET_VERSION" != "latest" ]; then
-                        read -p "是否安装指定版本 $TARGET_VERSION? (y/n) [默认: y]: " UPDATE_CHOICE
-                    else
-                        read -p "是否更新到新版本? (y/n) [默认: y]: " UPDATE_CHOICE
-                    fi
-                    UPDATE_CHOICE=${UPDATE_CHOICE:-y}
-
-                    if [ "$UPDATE_CHOICE" = "y" ] || [ "$UPDATE_CHOICE" = "Y" ]; then
-                        log "开始更新 Openclaw 到 $TARGET_VERSION"
-                        echo -e "${YELLOW}正在更新 Openclaw 到 $TARGET_VERSION...${NC}"
-                        # 使用 --ignore-scripts 跳过原生模块编译，--force 绕过平台兼容性检查（lancedb 不支持 android）
-                        run_cmd env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g openclaw@$TARGET_VERSION --ignore-scripts --force
-                        if [ $? -ne 0 ]; then
-                            log "Openclaw 更新失败"
-                            echo -e "${RED}错误：Openclaw 更新失败${NC}"
-                            exit 1
-                        fi
-                        log "Openclaw 更新完成"
-                        INSTALLED_VERSION=$(npm list -g openclaw --depth=0 2>/dev/null | grep -oE 'openclaw@[0-9]+\.[0-9]+\.[0-9]+' | cut -d@ -f2)
-                        echo -e "${GREEN}✅ Openclaw 已更新到 $INSTALLED_VERSION${NC}"
-                    else
-                        log "用户选择跳过更新"
-                        echo -e "${YELLOW}跳过更新，使用当前版本${NC}"
-                    fi
-                fi
-            else
-                if [ "$TARGET_VERSION" = "latest" ]; then
-                    log "版本已是最新"
-                    echo -e "${GREEN}✅ Openclaw 已是最新版本 $INSTALLED_VERSION${NC}"
-                fi
-            fi
-        fi
-    else
-        log "开始安装 Openclaw"
-        echo -e "${YELLOW}正在安装 Openclaw $TARGET_VERSION...${NC}"
-        # 使用 --ignore-scripts 跳过原生模块编译（koffi/clipboard 在 Termux 上无法编译）
-        run_cmd env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g openclaw@$TARGET_VERSION --ignore-scripts --force
-        if [ $? -ne 0 ]; then
-            log "Openclaw 安装失败"
-            echo -e "${RED}错误：Openclaw 安装失败${NC}"
-            exit 1
-        fi
-        log "Openclaw 安装完成"
-        INSTALLED_VERSION=$(npm list -g openclaw --depth=0 2>/dev/null | grep -oE 'openclaw@[0-9]+\.[0-9]+\.[0-9]+' | cut -d@ -f2)
-        if [ -z "$INSTALLED_VERSION" ]; then
-            INSTALLED_VERSION=$(npm view openclaw version 2>/dev/null || echo "unknown")
-        fi
-        echo -e "${GREEN}✅ Openclaw 已安装 (版本: $INSTALLED_VERSION)${NC}"
-    fi
-
+    local requested="${TARGET_VERSION:-latest}" resolved engine installed_engine
     BASE_DIR="$NPM_GLOBAL/lib/node_modules/openclaw"
-
-    # 运行 openclaw update 来构建原生模块
-    echo -e "${YELLOW}正在构建原生模块（可能需要几分钟）...${NC}"
-    export OA_GLIBC=1
-    # 设置 npm 忽略平台检查，避免 openclaw update 内部调用 npm 时因 lancedb 等包报 EBADPLATFORM
-    npm config set force true 2>/dev/null || true
-    run_cmd openclaw update || true
-    # 恢复 npm 默认配置（确保即使 update 失败也恢复，避免 force 永久生效）
-    npm config delete force 2>/dev/null || true
-
-    # 验证 dist 目录是否存在
-    if [ ! -d "$BASE_DIR/dist" ]; then
-        log "dist 目录缺失，尝试构建..."
-        echo -e "${YELLOW}⚠️  dist 目录缺失，尝试构建...${NC}"
-        cd "$BASE_DIR"
-        # 尝试多种构建方式
-        if [ -f "tsconfig.json" ]; then
-            npx tsc --skipLibCheck 2>/dev/null || true
-        fi
-        npm run build 2>/dev/null || true
-        # 再次验证
-        if [ ! -d "$BASE_DIR/dist" ]; then
-            log "dist 目录构建失败"
-            echo -e "${RED}错误：dist 目录构建失败，Openclaw 可能无法正常运行${NC}"
-            echo -e "${YELLOW}请检查是否有编译错误，或尝试手动构建${NC}"
-            exit 1
-        fi
-        log "dist 目录构建成功"
-        echo -e "${GREEN}✓ dist 目录构建成功${NC}"
+    export PATH="$NPM_BIN:$PATH"
+    INSTALLED_VERSION=""
+    if [ -f "$BASE_DIR/package.json" ]; then
+        INSTALLED_VERSION=$(package_version "$BASE_DIR")
+        [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "undefined" ] || {
+            echo -e "${RED}错误：无法读取已安装 OpenClaw 的版本${NC}" >&2; return 1;
+        }
     fi
-
-    # 创建 openclaw 包装脚本（解决 ESM bin 路径解析问题）
-    # 原 bin 文件使用 ESM 动态 import，符号链接方式无法正确解析模块路径
-    # 使用 shell 脚本包装，直接调用 node 执行 entry.js
-    log "创建 openclaw 包装脚本"
-    if [ -d "$BASE_DIR/dist" ] && [ -f "$BASE_DIR/dist/entry.js" ]; then
-        cat > "$NPM_BIN/openclaw" << WRAPPER
-#!/data/data/com.termux/files/usr/bin/sh
-exec node $BASE_DIR/dist/entry.js "\$@"
-WRAPPER
-        chmod +x "$NPM_BIN/openclaw"
-        echo -e "${GREEN}✓ openclaw 包装脚本创建成功${NC}"
-    fi
-
-    # 应用 koffi stub (Termux 兼容性修复)
-    apply_koffi_stub
-    apply_lancedb_stub
-
-    # 安装额外的运行时依赖（解决用户报告缺少依赖的问题）
-    log "安装额外依赖包"
-    echo -e "${YELLOW}[2.6/6] 正在安装额外依赖包...${NC}"
-    run_cmd npm install -g @larksuiteoapi/node-sdk @slack/web-api grammy @buape/carbon
-    if [ $? -eq 0 ]; then
-        log "额外依赖包安装成功"
-        echo -e "${GREEN}✓ 额外依赖包安装成功${NC}"
+    if [ "$requested" = latest ]; then
+        resolved=$(npm view openclaw@latest version 2>/dev/null) || resolved=""
     else
-        log "警告：部分额外依赖包安装失败"
-        echo -e "${YELLOW}⚠️  部分额外依赖包安装失败，但这通常不影响基础功能${NC}"
+        resolved=$(npm view "openclaw@$requested" version 2>/dev/null) || resolved=""
+        if [ "$resolved" != "$requested" ]; then
+            echo -e "${RED}错误：指定版本 $requested 不存在或不是精确版本${NC}" >&2
+            return 1
+        fi
     fi
+    if ! [[ "$resolved" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+        echo -e "${RED}错误：无法从 npm 获取具体 OpenClaw 版本（网络或元数据异常）${NC}" >&2
+        return 1
+    fi
+    TARGET_VERSION="$resolved"
+    engine=$(npm view "openclaw@$resolved" engines.node 2>/dev/null) || engine=""
+    if [ -z "$engine" ] || [ "$engine" = "undefined" ]; then
+        echo -e "${RED}错误：无法读取 OpenClaw $resolved 的 engines.node${NC}" >&2
+        return 1
+    fi
+    echo -e "${BLUE}目标 OpenClaw: ${resolved}；Node.js 要求: $engine${NC}"
+
+    local install_needed=1
+    if [ -n "$INSTALLED_VERSION" ]; then
+        echo -e "${BLUE}已安装 OpenClaw: $INSTALLED_VERSION${NC}"
+        if [ "$INSTALLED_VERSION" = "$resolved" ]; then
+            install_needed=0
+        elif [ "$FORCE_UPDATE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+            read -p "是否安装 ${resolved}（当前 ${INSTALLED_VERSION}）? (y/n) [默认: y]: " UPDATE_CHOICE
+            UPDATE_CHOICE=${UPDATE_CHOICE:-y}
+            if [ "$UPDATE_CHOICE" != y ] && [ "$UPDATE_CHOICE" != Y ]; then install_needed=0; fi
+        fi
+    fi
+    if [ "$install_needed" -eq 0 ]; then
+        if [ -z "$INSTALLED_VERSION" ]; then
+            echo -e "${RED}错误：没有可用的 OpenClaw 安装${NC}" >&2; return 1
+        fi
+        installed_engine=$(node -p "require(process.argv[1]).engines?.node || ''" "$BASE_DIR/package.json" 2>/dev/null) || installed_engine=""
+        [ -n "$installed_engine" ] || { echo -e "${RED}错误：已安装版本缺少 engines.node${NC}" >&2; return 1; }
+        check_engine "$INSTALLED_VERSION" "$installed_engine" || return 1
+        echo -e "${YELLOW}继续使用已安装版本 $INSTALLED_VERSION${NC}"
+    fi
+    if [ "$install_needed" -eq 1 ]; then
+        check_engine "$resolved" "$engine" || return 1
+        mkdir -p "$NPM_GLOBAL" "$LOG_DIR" "$HOME/tmp"
+        npm config set prefix "$NPM_GLOBAL" || return 1
+        export PATH="$NPM_BIN:$PATH" TMPDIR="$HOME/tmp"
+        # 仅删除本安装器生成的旧包装文件，绝不覆盖未知的用户文件。
+        if [ -e "$NPM_BIN/openclaw" ] && [ ! -L "$NPM_BIN/openclaw" ]; then
+            if is_managed_openclaw_wrapper; then
+                rm "$NPM_BIN/openclaw" || return 1
+            else
+                echo -e "${RED}错误：$NPM_BIN/openclaw 是未知的普通文件，拒绝覆盖。请先手工处理。${NC}" >&2
+                return 1
+            fi
+        fi
+        if ! env NODE_LLAMA_CPP_SKIP_DOWNLOAD=true npm i -g "openclaw@$resolved" --ignore-scripts; then
+            echo -e "${RED}错误：Android 平台可能不支持所需原生模块；请改用 proot 安装。${NC}" >&2
+            return 1
+        fi
+        [ "$(package_version "$BASE_DIR")" = "$resolved" ] || {
+            echo -e "${RED}错误：安装后的包版本不等于 $resolved${NC}" >&2; return 1;
+        }
+        (cd "$BASE_DIR" && npm run postinstall --if-present --ignore-scripts) || {
+            echo -e "${RED}错误：OpenClaw postinstall 失败；Android 原生功能不支持时请使用 proot。${NC}" >&2
+            return 1
+        }
+        echo -e "${YELLOW}已跳过依赖包的原生安装脚本：部分 Android 原生功能可能不可用；若失败请使用 proot。${NC}"
+    fi
+    local native_file
+    for native_file in "$BASE_DIR/node_modules/koffi/index.js" \
+        "$BASE_DIR/node_modules/@lancedb/lancedb/index.js" \
+        "$BASE_DIR/node_modules/@mariozechner/clipboard/index.js"; do
+        if [ -f "$native_file" ] &&
+            grep -Eq 'stub for android-arm64|module.exports = \{ availableFormats:\(\)=>\[\]' "$native_file"; then
+            echo -e "${RED}错误：检测到旧脚本留下的假原生模块；请干净重装官方包，或使用 proot。${NC}" >&2
+            return 1
+        fi
+    done
+    [ -f "$BASE_DIR/openclaw.mjs" ] || {
+        echo -e "${RED}错误：缺少官方入口 openclaw.mjs${NC}" >&2; return 1;
+    }
+    mkdir -p "$NPM_BIN"
+    # npm bin 可能是指向包入口的符号链接，先移除链接，绝不能重定向覆盖其目标。
+    if [ -e "$NPM_BIN/openclaw" ] && [ ! -L "$NPM_BIN/openclaw" ] &&
+       ! is_managed_openclaw_wrapper; then
+        echo -e "${RED}错误：$NPM_BIN/openclaw 是未知的普通文件，拒绝覆盖。${NC}" >&2
+        return 1
+    fi
+    if [ -L "$NPM_BIN/openclaw" ]; then rm "$NPM_BIN/openclaw" || return 1; fi
+    cat > "$NPM_BIN/openclaw" <<WRAPPER
+#!${PREFIX:-/data/data/com.termux/files/usr}/bin/sh
+exec node "$BASE_DIR/openclaw.mjs" "\$@"
+WRAPPER
+    chmod +x "$NPM_BIN/openclaw"
 }
 
 apply_patches() {
@@ -721,46 +451,6 @@ apply_patches() {
         log "npm 路径无需修复"
     fi
 
-    # 修复剪贴板
-    CLIP_FILE="$BASE_DIR/node_modules/@mariozechner/clipboard/index.js"
-    if [ -f "$CLIP_FILE" ]; then
-        log "应用剪贴板补丁"
-        node -e "const fs = require('fs'); const file = '$CLIP_FILE'; const mock = 'module.exports = { availableFormats:()=>[], getText:()=>\"\", setText:()=>false, hasText:()=>false, getImageBinary:()=>null, getImageBase64:()=>null, setImageBinary:()=>false, setImageBase64:()=>false, hasImage:()=>false, getHtml:()=>\"\", setHtml:()=>false, hasHtml:()=>false, getRtf:()=>\"\", setRtf:()=>false, hasRtf:()=>false, clear:()=>{}, watch:()=>({stop:()=>{}}), callThreadsafeFunction:()=>{} };'; fs.writeFileSync(file, mock);"
-        if [ $? -ne 0 ]; then
-            log "剪贴板补丁应用失败"
-            echo -e "${RED}错误：剪贴板补丁应用失败${NC}"
-            exit 1
-        fi
-        # 验证补丁是否生效
-        if ! grep -q "availableFormats" "$CLIP_FILE"; then
-            log "剪贴板补丁验证失败"
-            echo -e "${RED}错误：剪贴板补丁未正确应用，请检查文件内容${NC}"
-            exit 1
-        fi
-        log "剪贴板补丁应用成功"
-    fi
-
-    # 修复 openclaw 可执行文件的 shebang（Termux 兼容性）
-    OPENCLAW_BIN="$NPM_BIN/openclaw"
-    if [ -f "$OPENCLAW_BIN" ]; then
-        log "检查并修复 openclaw 可执行文件的 shebang"
-        # 只在 /usr/bin/env 不存在时修复（即 Termux 环境）
-        if [ ! -x "/usr/bin/env" ] && head -n1 "$OPENCLAW_BIN" | grep -q "^#!/usr/bin/env"; then
-            # 使用 PREFIX 环境变量获取 Termux 的实际前缀路径
-            TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
-            # 确认目标 env 存在且可执行
-            if [ -x "${TERMUX_PREFIX}/bin/env" ]; then
-                sed -i "1s|#!/usr/bin/env|#!${TERMUX_PREFIX}/bin/env|" "$OPENCLAW_BIN"
-                log "openclaw shebang 已修复"
-                echo -e "${GREEN}✓ openclaw shebang 已修复为 Termux 兼容路径${NC}"
-            else
-                log "警告: Termux env 路径不存在"
-                echo -e "${YELLOW}⚠️  Termux env 路径不存在，跳过 shebang 修复${NC}"
-            fi
-        else
-            log "openclaw shebang 无需修复"
-        fi
-    fi
 }
 
 setup_autostart() {
@@ -791,7 +481,6 @@ termux-wake-lock 2>/dev/null"
 # --- OpenClaw Start ---
 # WARNING: This section contains your access token - keep ~/.bashrc secure
 export TERMUX_VERSION=1
-export OA_GLIBC=1
 export TMPDIR=\$HOME/tmp
 export OPENCLAW_GATEWAY_TOKEN=$TOKEN
 export PATH=$NPM_BIN:\$PATH
@@ -811,22 +500,26 @@ ocr() {
     pkill -9 -f 'openclaw' 2>/dev/null
     tmux kill-session -t openclaw 2>/dev/null
     sleep 1
-    tmux new -d -s openclaw
+    tmux new -d -s openclaw || return 1
     sleep 1
-    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured" C-m
-    sleep 2
-    if tmux has-session -t openclaw 2>/dev/null; then
+    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured" C-m || return 1
+    local attempt
+    for ((attempt=1; attempt<=30; attempt++)); do
+        if curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/healthz" >/dev/null; then break; fi
+        [ "\$attempt" -eq 30 ] || sleep 2
+    done
+    if [ "\$attempt" -le 30 ]; then
         echo ""
-        echo -e "\${GREEN}✅ OpenClaw 服务已启动\${NC}"
-        echo ""
-        echo -e "\${CYAN}📖 使用方法:\${NC}"
+        echo -e "\${GREEN}✅ Gateway /healthz 已就绪（不代表模型功能可用）\${NC}"
+        echo -e "\${CYAN}本机访问: http://localhost:$PORT/?token=\$OPENCLAW_GATEWAY_TOKEN\${NC}"
         echo "   1. 本手机浏览器打开: http://localhost:$PORT/?token=\$OPENCLAW_GATEWAY_TOKEN"
         echo "   2. 或运行命令: openclaw tui"
         echo "   3. 或使用 Telegram 机器人(若已配置)"
         echo ""
         echo -e "\${BLUE}💡 oclog 查看日志 | ockill 停止服务\${NC}"
     else
-        echo -e "\${RED}❌ 服务启动失败，请检查日志（openclaw logs）\${NC}"
+        echo -e "\${RED}❌ Gateway 未在规定时间内通过 HTTP /healthz，请查看 oclog；Android 原生功能不支持时请使用 proot。\${NC}"
+        return 1
     fi
 }
 
@@ -898,8 +591,12 @@ start_service() {
             sleep 1
         else
             log "用户选择不重启"
-            echo -e "${GREEN}跳过启动，保持当前实例运行${NC}"
-            return 0
+            if wait_for_gateway; then
+                echo -e "${GREEN}现有 Gateway HTTP /healthz 已就绪（不代表模型功能可用）${NC}"
+                return 0
+            fi
+            echo -e "${RED}错误：现有 Gateway 未通过 HTTP /healthz${NC}" >&2
+            return 1
         fi
     fi
 
@@ -918,13 +615,11 @@ start_service() {
     log "服务指令已发送"
     echo ""
     
-    # 4. 实时验证
-    sleep 2
-    if tmux has-session -t openclaw 2>/dev/null; then
-        echo -e "${GREEN}[6/6] ✅ tmux 会话已建立，Gateway 服务已启动！${NC}"
+    if wait_for_gateway; then
+        echo -e "${GREEN}[6/6] ✅ Gateway HTTP /healthz 已就绪（不代表模型功能可用）${NC}"
     else
-        echo -e "${RED}❌ 错误：tmux 会话启动后立即崩溃。${NC}"
-        echo -e "请检查报错日志: ${YELLOW}cat $LOG_DIR/runtime.log${NC}"
+        echo -e "${RED}错误：Gateway 未在规定时间内通过 HTTP /healthz；请检查 $LOG_DIR/runtime.log。Android 原生功能不支持时请使用 proot。${NC}" >&2
+        return 1
     fi
 }
 
@@ -990,10 +685,8 @@ uninstall_openclaw() {
 
 # 主脚本
 
-# 卸载模式直接执行
-if [ $UNINSTALL -eq 1 ]; then
+if [ "$UNINSTALL" -eq 1 ]; then
     uninstall_openclaw
-    # source 模式下 return 只退出脚本，exit 会退出整个 shell
     [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 0 || return 0
 fi
 
@@ -1055,12 +748,11 @@ AUTO_START=${AUTO_START:-y}
 # 执行步骤
 log "脚本开始执行，用户配置: 端口=$PORT, Token=$TOKEN, 自启动=$AUTO_START"
 check_deps
-install_glibc
-configure_npm
+configure_npm || { [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 || return 1; }
 apply_patches
 setup_autostart
 activate_wakelock
-start_service
+start_service || { [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 || return 1; }
 
 echo ""
 echo -e "${GREEN}=========================================="
@@ -1078,12 +770,6 @@ echo -e "${BLUE}│${NC}  ${CYAN}ocr${NC}      - 重启服务                ${B
 echo -e "${BLUE}└─────────────────────────────────────┘${NC}"
 echo ""
 
-# dry-run 模式跳过配置引导
-if [ $DRY_RUN -eq 1 ]; then
-    echo -e "${YELLOW}模拟运行完成，未执行实际安装${NC}"
-    log "模拟运行完成"
-    exit 0
-fi
 
 # 更新模式跳过配置引导
 if [ $FORCE_UPDATE -eq 1 ]; then
@@ -1092,12 +778,7 @@ if [ $FORCE_UPDATE -eq 1 ]; then
     exit 0
 fi
 
-# 检查服务是否正常启动
-if ! tmux has-session -t openclaw 2>/dev/null; then
-    echo -e "${RED}服务启动失败，请检查日志（openclaw logs）后手动执行 openclaw onboard${NC}"
-    log "服务启动失败"
-    exit 1
-fi
+# start_service 已在 HTTP /healthz 验证 Gateway 就绪；模型功能仍需用户配置后确认。
 
 # 显示最终信息的函数
 show_final_info() {
@@ -1116,9 +797,7 @@ show_final_info() {
         echo -e "${GREEN}✅ 配置完成！${NC}"
         if [ "$SHOW_IGNORE_HINT" = "true" ]; then
             echo ""
-            echo -e "若显示 ${YELLOW}'Gateway service install not supported on android'${NC} 错误，可${CYAN}忽略${NC}。"
-            echo ""
-            echo -e "${YELLOW}不要使用 openclaw gateway 命令${NC}，请用 ${CYAN}ocr${NC} 命令启动 Gateway 。"
+            echo -e "${YELLOW}Android 不支持 Gateway service install 时，请用 ocr 启动用户会话中的 Gateway；其他原生模块报错不能忽略，请改用 proot。${NC}"
         fi
         echo ""
         echo -e "${CYAN}👉 下一步：手机浏览器访问${NC}"
@@ -1128,7 +807,7 @@ show_final_info() {
         echo -e "${YELLOW}后续请手动执行 openclaw onboard 继续配置${NC}"
         if [ "$SHOW_IGNORE_HINT" = "true" ]; then
             echo ""
-            echo -e "${YELLOW}配置过程中，若显示 'Gateway service install not supported on android' 错误，可忽略${NC}。也别使用 openclaw gateway 命令，用 ocr 命令启动。"
+            echo -e "${YELLOW}Gateway service install 在 Android 上不受支持，可用 ocr 启动；原生模块错误请使用 proot。${NC}"
         fi
     fi
 }
@@ -1142,9 +821,7 @@ echo -e "即将执行 ${YELLOW}openclaw onboard ${NC}命令..."
 echo ""
 echo -e "请准备好 ${YELLOW}大模型 API Key ${NC}，中国大陆推荐 MiniMax（minimax-cn）、智谱（z-ai） 等"
 echo ""
-echo -e "配置完成后，若显示 ${YELLOW}'Gateway service install not supported on android'${NC} 错误，可${CYAN}忽略${NC}。"
-echo ""
-echo -e "${YELLOW}⚠️不要使用 openclaw gateway 命令${NC}。用 ${CYAN}ocr${NC} 命令启动。"
+echo -e "${YELLOW}Gateway service install 在 Android 上不受支持；ocr 使用 tmux 启动 Gateway。其他原生模块错误请使用 proot。${NC}"
 echo ""
 read -p "是否继续？[Y/n]: " CONTINUE_ONBOARD
 CONTINUE_ONBOARD=${CONTINUE_ONBOARD:-y}
@@ -1177,13 +854,12 @@ if [[ "$CONTINUE_ONBOARD" =~ ^[Yy]$ ]]; then
             tmux new -d -s openclaw
             sleep 1
             tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=$TOKEN; openclaw gateway --bind loopback --port $PORT --token \$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured 2>&1 | tee $LOG_DIR/runtime.log" C-m
-            sleep 2
-            if tmux has-session -t openclaw 2>/dev/null; then
-                log "Gateway 重启成功"
-                echo -e "${GREEN}✅ Gateway 服务已重启，Token 配置已生效${NC}"
+            if wait_for_gateway; then
+                log "Gateway HTTP 就绪"
+                echo -e "${GREEN}✅ Gateway /healthz 就绪（不代表模型功能可用）${NC}"
             else
-                log "Gateway 重启失败"
-                echo -e "${RED}⚠️ Gateway 重启失败，请手动执行 ocr 命令${NC}"
+                echo -e "${RED}错误：Gateway 重启后未通过 HTTP /healthz，请检查日志；Android 原生功能不支持时请使用 proot。${NC}" >&2
+                [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 || return 1
             fi
         else
             log "警告: 更新 openclaw.json 中的 token 失败"
