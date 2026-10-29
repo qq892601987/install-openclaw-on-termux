@@ -8,7 +8,7 @@ Install, update, and manage OpenClaw Gateway on Android with Termux.
 
 ## Compatibility and limitations
 
-This update targets the published contract of OpenClaw **2026.10.8**. **Android/Termux device acceptance is still pending**; this is not a claim that every feature works on that version.
+The **Chinese native installer has now been exercised on a non-root Android device**; see the device-verification record below. This is not a guarantee for every device, installer, or OpenClaw feature.
 
 - OpenClaw 2026.10.8 requires Node.js **`>=24.22.1 <25 || >=26.12.1`**. Other releases use their own npm `engines.node` requirement. Checking only “Node >=22” or the major version is insufficient.
 - Installers resolve npm `latest` to a concrete version before reading its runtime requirements and installing it. Use an exact `--version` for reproducible installations.
@@ -83,11 +83,11 @@ These options apply to the Chinese and English native installers. See v2's `--he
 | `--verbose`, `-v` | Verbose output |
 | `--dry-run`, `-d` | Preview without installing packages, writing configuration, or starting services; not proof that installation will succeed |
 | `--version`, `-V <version>` | Select a version, including downgrades; no subsequent automatic `openclaw update` changes it |
-| `--update`, `-U` | Skip the package-update confirmation; configuration may still prompt |
+| `--update`, `-U` | Install the target without confirmation, even when already installed, to repair interrupted dependencies; configuration may still prompt |
 | `--uninstall`, `-u` | Uninstall and remove managed configuration; back up first |
 
 ```bash
-# Example version, not a device-tested compatibility guarantee
+# Exact-version example; see the scoped device-verification record
 bash install-openclaw-termux_En.sh --version 2026.10.8
 
 # Update to the latest version resolved at runtime
@@ -103,6 +103,14 @@ bash install-openclaw-termux-v2.sh --yes --version 2026.10.8
 Native installation skips automatic npm lifecycle execution to avoid unsupported Android dependency builds, then explicitly runs the OpenClaw package's own postinstall if present. This **does not build every native dependency**. Verify required native functionality separately; inspect failures or use proot. The proot path uses the normal npm installation lifecycle.
 
 Complete engine-range validation uses npm's `semver` tool and needs registry access. Missing version or engine metadata is an error, not permission to guess compatibility.
+
+If the official npm registry is slow, select a trusted mirror for one invocation without changing the global registry:
+
+```bash
+npm_config_registry=https://registry.npmmirror.com bash install-openclaw-termux_En.sh --version 2026.10.8
+```
+
+Copy download commands as complete lines; do not submit `-o` and its filename separately. Mirrors are third-party sources. The OpenClaw 2026.10.8 tarball integrity value matched the official registry in this test; other releases still require normal npm integrity validation.
 
 ## Configuration and service management
 
@@ -144,6 +152,8 @@ Configure the model and channels, then complete a real model request. npm succes
 | Missing official launcher or build output | Reinstall the npm release package. Do not try to compile an incomplete globally installed package with `tsc`. |
 | Gateway readiness timeout | Startup waits up to 180 seconds. Inspect `~/openclaw-logs/runtime.log` and the actual port. Native timeout does not stop Gateway; it may still be starting, so avoid repeatedly restarting it. |
 | Android stops background execution | Disable Termux battery optimization and check background permissions and wake lock. Neither tmux nor wake lock guarantees survival of Android process termination. |
+| `dpkg` reports `end of file on stdin` at a conffile prompt | The updated installer preserves local configuration without waiting for that prompt. For an interrupted transaction, run `dpkg --force-confdef --force-confold --configure -a` inside Termux before retrying, not in Android `adb shell`. |
+| `gateway auth mode is token, but no token was configured` | Regenerate service helpers using the updated installer. The token is passed through the environment rather than a multiply escaped literal `$OPENCLAW_GATEWAY_TOKEN` argument. Do not disable authentication. |
 
 Do not use `pkill -9 node`: it kills unrelated Node services. Back up state before accepting configuration repairs proposed by Doctor.
 
@@ -195,9 +205,25 @@ The legacy native uninstall flow removes `~/.npm-global`, which may contain othe
 - Use bounded HTTP readiness checks for native startup; stop pinning proot to Node 22.
 - Update installation URLs, limitations, and verification guidance. Local checks do not replace Android device acceptance.
 
+## Device-verification record
+
+| Item | Observed result |
+| --- | --- |
+| Device and OS | Samsung SM-T510, Android 11, no root; 32-bit ARM userspace |
+| Termux and runtime | Termux 0.119.0-beta.3; Node 24.22.1, npm 11.21.1, `process.arch=arm` |
+| Release and entrypoint | OpenClaw 2026.10.8; Chinese native installer |
+| Installation and upgrade recovery | Actual npm install, postinstall, and package upgrade preserving local configuration; normal installer exited 0 |
+| Service management | Generated `ocr` restarted Gateway successfully; HTTP `/healthz` returned `ok: true` |
+| Authentication | `openclaw health --json` returned `ok: true`, with no plugin-loading errors |
+| Phone browser | Actual Chrome rendered model settings; Gateway logged the Control UI WebSocket connection and successful configuration read |
+
+No model API key was entered, so model replies, messaging channels, vector storage, and related features remain unverified. The English, v2, and proot paths received code/local regression checks, not separate device acceptance. Startup took about 80 seconds and the device reported CPU pressure; a 2-second initial dashboard-probe timeout is not itself a stopped Gateway.
+
+Device-driven fixes include noninteractive upgrades preserving local conffiles, skipping `clear` without a TTY, same-version repair with `--update`, and removal of multiply escaped Gateway token arguments. Skill-watcher polling warnings were not hidden.
+
 ## Local regression checks
 
-Verified locally on macOS arm64 / Node 26.12.1: syntax for all four scripts, 33 CLI safety scenarios, actual pinned npm installation and postinstall, and wrapper plus HTTP readiness/timeout paths for all three native entrypoints. A real OpenClaw 2026.10.8 Gateway returned `{"ok":true,"status":"live"}` at `/healthz`. Service-management commands were isolated; Android pkg, tmux, proot, and actual model calls were not exercised.
+Earlier macOS arm64 / Node 26.12.1 checks covered syntax for all four scripts, 33 CLI safety scenarios, actual pinned npm installation/postinstall, and wrapper plus HTTP readiness/timeout paths for all three native entrypoints. That round did not exercise Android; the new device results are scoped above.
 
 Dependency cleanup was also exercised with an isolated minimal PATH: all three native dependency checks passed without compilers, Python, Go, `which`, or Termux:API and did not request package installation; the previous installer incorrectly requested packages in the same scenario. Actual v2 npm/git configuration also completed without creating `.gyp`.
 

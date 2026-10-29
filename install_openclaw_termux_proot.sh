@@ -231,10 +231,10 @@ if ! apt_update_cleanly "$FINAL_APT_UPDATE_LOG"; then
   exit 1
 fi
 rm -f "$FINAL_APT_UPDATE_LOG"
-DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y
 
 # 4. 保留 npm 原生模块的编译后备；不预装编辑器和无关 Python 工具。
-DEBIAN_FRONTEND=noninteractive apt-get install -y curl build-essential git ca-certificates python3
+DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y curl build-essential git ca-certificates python3
 
 # 5. 在 Ubuntu proot 内安装所选 Node.js LTS（默认 24）
 export NVM_DIR="$HOME/.nvm"
