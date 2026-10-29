@@ -10,7 +10,7 @@
 #   --verbose, -v    Enable verbose output (shows command execution details)
 #   --dry-run, -d    Dry run mode (simulate execution without making changes)
 #   --uninstall, -u  Uninstall Openclaw and clean up configurations
-#   --update, -U     Force update Openclaw to latest version without prompting
+#   --update, -U     Install the target version without prompting, even if already installed
 #   --version, -V    Specify Openclaw version to install (e.g., --version 2026.2.26)
 #
 # Examples:
@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --verbose, -v    Enable verbose output"
             echo "  --dry-run, -d    Dry run mode, simulate without executing actual commands"
             echo "  --uninstall, -u  Uninstall Openclaw and related configurations"
-            echo "  --update, -U     Force update to latest version"
+            echo "  --update, -U     Force target installation (default latest), including same-version repair"
             echo "  --version, -V    Specify Openclaw version (e.g., 2026.2.26)"
             echo "  --help, -h       Show this help message"
             echo ""
@@ -219,13 +219,15 @@ check_deps() {
     if [ ${#MISSING_DEPS[@]} -ne 0 ]; then
         log "Missing dependencies: ${MISSING_DEPS[*]}"
         echo -e "${YELLOW}Checking for potentially missing components: ${MISSING_DEPS[*]}${NC}"
-        run_cmd pkg upgrade -y
+        run_cmd env DEBIAN_FRONTEND=noninteractive pkg upgrade -y \
+            -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
         if [ $? -ne 0 ]; then
             log "pkg upgrade failed"
             echo -e "${RED}Error: pkg upgrade failed${NC}"
             exit 1
         fi
-        run_cmd pkg install "${MISSING_DEPS[@]}" -y
+        run_cmd env DEBIAN_FRONTEND=noninteractive pkg install "${MISSING_DEPS[@]}" -y \
+            -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
         if [ $? -ne 0 ]; then
             log "Dependency installation failed"
             echo -e "${RED}Error: Dependency installation failed${NC}"
@@ -321,7 +323,7 @@ configure_npm() {
     local install_needed=1
     if [ -n "$INSTALLED_VERSION" ]; then
         echo -e "${BLUE}Installed OpenClaw: $INSTALLED_VERSION${NC}"
-        if [ "$INSTALLED_VERSION" = "$resolved" ]; then
+        if [ "$INSTALLED_VERSION" = "$resolved" ] && [ "$FORCE_UPDATE" -eq 0 ]; then
             install_needed=0
         elif [ "$FORCE_UPDATE" -eq 0 ]; then
             read -p "Install $resolved (currently $INSTALLED_VERSION)? (y/n) [default: y]: " UPDATE_CHOICE
@@ -510,7 +512,7 @@ ocr() {
     sleep 1
     tmux new -d -s openclaw || return 1
     sleep 1
-    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured 2>&1 | tee '$LOG_DIR/runtime.log'" C-m || return 1
+    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --allow-unconfigured 2>&1 | tee '$LOG_DIR/runtime.log'" C-m || return 1
     local deadline remaining
     deadline=\$((SECONDS + 180))
     while (( (remaining = deadline - SECONDS) > 0 )); do
@@ -619,7 +621,7 @@ start_service() {
     sleep 1
     
     # Redirect output to a temporary file, so we can see errors if tmux crashes
-    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured 2>&1 | tee $LOG_DIR/runtime.log" C-m
+    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --allow-unconfigured 2>&1 | tee $LOG_DIR/runtime.log" C-m
     
     log "Service command sent"
     echo ""
@@ -700,7 +702,9 @@ if [ "$UNINSTALL" -eq 1 ]; then
     [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 0 || return 0
 fi
 
-clear
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "$TERM" != dumb ]; then
+    clear
+fi
 if [ $DRY_RUN -eq 1 ]; then
     echo -e "${YELLOW}🔍 Dry run mode: no actual commands will be executed${NC}"
 fi
@@ -863,7 +867,7 @@ if [[ "$CONTINUE_ONBOARD" =~ ^[Yy]$ ]]; then
             sleep 1
             tmux new -d -s openclaw
             sleep 1
-            tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=$TOKEN; openclaw gateway --bind loopback --port $PORT --token \$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured 2>&1 | tee $LOG_DIR/runtime.log" C-m
+            tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=$TOKEN; openclaw gateway --bind loopback --port $PORT --allow-unconfigured 2>&1 | tee $LOG_DIR/runtime.log" C-m
             if wait_for_gateway; then
                 log "Gateway HTTP ready"
                 echo -e "${GREEN}Gateway /healthz ready (model function not verified)${NC}"

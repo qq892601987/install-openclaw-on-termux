@@ -8,7 +8,7 @@
 
 ## 兼容性与限制
 
-本次更新对照 OpenClaw **2026.10.8** 的发布契约；**尚未完成 Android/Termux 真机验收**，不代表该版本的所有功能已经适配。
+已完成一次**非 root Android 原生中文安装器**的真机验证，具体范围见下方“真机验证记录”。这不代表所有设备、所有脚本或 OpenClaw 的所有功能均已兼容。
 
 - OpenClaw 2026.10.8 要求 Node.js **`>=24.22.1 <25 || >=26.12.1`**。其他版本以该版本 npm 包的 `engines.node` 为准，不能只检查“Node ≥22”或主版本号。
 - 安装器默认将 npm `latest` 解析为一个具体版本，再读取并检查该版本的 Node 要求。需要可重复安装时，请使用 `--version` 指定准确版本。
@@ -83,11 +83,11 @@ bash openclaw-proot.sh --version 2026.10.8
 | `--verbose`, `-v` | 详细输出 |
 | `--dry-run`, `-d` | 查看计划，不执行安装、配置写入或服务启动；不代表真实安装一定成功 |
 | `--version`, `-V <version>` | 安装指定版本，包括降级；不会再自动调用 `openclaw update` 改成其他版本 |
-| `--update`, `-U` | 不询问是否更新软件包；其他配置仍可能需要交互 |
+| `--update`, `-U` | 不询问并重新安装目标版本；即使版本相同也重装，可修复中断的依赖安装。其他配置仍可能需要交互 |
 | `--uninstall`, `-u` | 卸载并清理脚本管理的配置；执行前先备份 |
 
 ```bash
-# 指定版本；版本号仅作为示例，不代表已经真机验证
+# 固定版本安装示例；兼容性以真机验证记录中的范围为准
 bash install-openclaw-termux.sh --version 2026.10.8
 
 # 更新到运行时查询得到的 latest
@@ -103,6 +103,14 @@ bash install-openclaw-termux-v2.sh --yes --version 2026.10.8
 原生安装为避免 Android 不支持的依赖编译，先跳过 npm 自动生命周期，再显式执行 OpenClaw 包自身的 postinstall（如果存在）。这**不代表所有原生依赖已完成构建**；需要原生功能时仍须单独验证，失败应查看错误或改用 proot。proot 使用正常 npm 安装生命周期。
 
 安装器使用 npm 提供的 `semver` 工具检查完整版本范围，因此需要能访问 npm registry。无法取得版本或运行时要求时会停止，不在信息缺失时猜测兼容性。
+
+如果官方 npm 源下载缓慢，可仅对本次运行指定你信任的镜像，不必修改全局 registry：
+
+```bash
+npm_config_registry=https://registry.npmmirror.com bash install-openclaw-termux.sh --version 2026.10.8
+```
+
+完整复制下载命令，不要把 `-o` 和文件名分成两次回车。镜像是第三方来源；此次测试中 OpenClaw 2026.10.8 的发布包完整性值与官方源一致，其他版本仍须正常进行 npm 校验。
 
 ## 配置和服务管理
 
@@ -144,6 +152,8 @@ curl --fail --silent --show-error http://127.0.0.1:18789/healthz
 | 缺少官方启动文件或构建产物 | 重新安装对应的 npm 发布包；不要在不完整的全局包目录中尝试 `tsc` 构建。 |
 | Gateway 健康检查超时 | 启动等待上限为 180 秒；查看 `~/openclaw-logs/runtime.log` 和实际端口。原生安装超时不会停止 Gateway，它可能仍在启动；不要因此反复重启。 |
 | 后台运行中断 | 关闭 Android 对 Termux 的电池优化，检查后台权限及唤醒锁。tmux 和唤醒锁不能保证系统永不杀进程。 |
+| `dpkg` 在配置文件提示处报 `end of file on stdin` | 新版安装器保留本地配置，不再等待此类交互。若软件包已处于中断状态，在 Termux 内执行 `dpkg --force-confdef --force-confold --configure -a` 后重试；不要在 Android 的 `adb shell` 中执行。 |
+| `gateway auth mode is token, but no token was configured` | 更新安装器后重新生成服务命令；Token 通过环境变量传递，不再把被转义的 `$OPENCLAW_GATEWAY_TOKEN` 当作 `--token` 的字面值。不要关闭认证绕过错误。 |
 
 不要使用 `pkill -9 node`，它会杀死其他 Node 服务。`openclaw doctor` 可能提出配置修复，执行修复前备份状态目录。
 
@@ -195,9 +205,25 @@ bash install-openclaw-termux.sh --uninstall
 - 原生启动使用有界 HTTP 健康检查，proot 不再固定安装 Node 22。
 - 同步安装入口、功能限制和验证说明；本地验证不代替 Android 真机验收。
 
+## 真机验证记录
+
+| 项目 | 实际结果 |
+| --- | --- |
+| 设备与系统 | Samsung SM-T510，Android 11，无 root；32 位 ARM 用户空间 |
+| Termux 与运行时 | Termux 0.119.0-beta.3；Node 24.22.1，npm 11.21.1，`process.arch=arm` |
+| 测试版本与入口 | OpenClaw 2026.10.8；中文原生安装脚本 |
+| 安装与升级恢复 | 实际 npm 安装、postinstall 和保留既有配置的软件包升级完成；正常安装入口退出码为 0 |
+| 服务管理 | 生成的 `ocr` 实际重启成功；HTTP `/healthz` 返回 `ok: true` |
+| 认证 | `openclaw health --json` 返回 `ok: true`，插件加载错误为空 |
+| 手机浏览器 | 实际 Chrome 渲染模型设置页；Gateway 日志确认 Control UI WebSocket 已连接并成功读取配置 |
+
+未输入模型 API Key，因此未验证模型回复、消息渠道、向量存储等功能；英文、v2 和 proot 入口此次仅做代码及本地回归检查，未冒充逐一真机验证。该设备启动耗时约 80 秒，并曾报告 CPU 压力；初次控制台探测的 2 秒超时不等于 Gateway 已停止。
+
+此次真机修复还包括：保留本地包配置文件的非交互升级、无 TTY 时不执行 `clear`、允许 `--update` 修复同版本中断安装，以及移除 Gateway 启动命令中多层转义错误的 Token 参数。技能监听的轮询降级提示没有被隐藏。
+
 ## 本地回归检查
 
-本次在 macOS arm64 / Node 26.12.1 上通过：四个脚本的语法检查、33 个 CLI 安全场景、实际 npm 指定版本安装与 postinstall、三个原生入口的包装器和 HTTP 就绪/超时路径。真实 OpenClaw 2026.10.8 Gateway 的 `/healthz` 返回 `{"ok":true,"status":"live"}`。服务管理命令在隔离环境中验证，未验证 Android 的 pkg、tmux、proot 或实际模型调用。
+此前在 macOS arm64 / Node 26.12.1 上通过：四个脚本的语法检查、33 个 CLI 安全场景、实际 npm 指定版本安装与 postinstall、三个原生入口的包装器和 HTTP 就绪/超时路径。那轮检查未覆盖 Android；本轮新增的真机结果以上方记录为准。
 
 依赖精简另在隔离的最小 PATH 下执行三个原生安装器的依赖检查：无编译工具、Python、Go、`which` 或 Termux:API 时均通过，且不触发补包；旧版同场景会误判缺包。v2 实际 npm/git 配置也通过，未创建 `.gyp`。
 

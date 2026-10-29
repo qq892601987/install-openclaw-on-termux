@@ -312,7 +312,7 @@ stop_openclaw_gateway_service() {
 }
 
 build_gateway_tmux_command() {
-    printf '%s' "if [ -f \"$OPENCLAW_ENV_FILE\" ]; then . \"$OPENCLAW_ENV_FILE\"; fi; export PATH=\"$NPM_BIN:\$PATH\" TMPDIR=\"$TMP_DIR\"; openclaw gateway --bind loopback --port \"\${OPENCLAW_PORT:-$PORT}\" --token \"\$OPENCLAW_GATEWAY_TOKEN\" --allow-unconfigured 2>&1 | tee \"$LOG_DIR/runtime.log\""
+    printf '%s' "if [ -f \"$OPENCLAW_ENV_FILE\" ]; then . \"$OPENCLAW_ENV_FILE\"; fi; export PATH=\"$NPM_BIN:\$PATH\" TMPDIR=\"$TMP_DIR\"; openclaw gateway --bind loopback --port \"\${OPENCLAW_PORT:-$PORT}\" --allow-unconfigured 2>&1 | tee \"$LOG_DIR/runtime.log\""
 }
 
 render_openclaw_runtime_functions() {
@@ -832,11 +832,13 @@ maybe_install_missing_dependencies() {
 
     DEPENDENCY_INSTALL_PENDING=1
     warn "缺失依赖：${missing_deps[*]}"
-    run_cmd pkg upgrade -y || {
+    run_cmd env DEBIAN_FRONTEND=noninteractive pkg upgrade -y \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold || {
         die "pkg upgrade 失败"
         return $?
     }
-    run_cmd pkg install "${missing_deps[@]}" -y || {
+    run_cmd env DEBIAN_FRONTEND=noninteractive pkg install "${missing_deps[@]}" -y \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold || {
         die "依赖安装失败：${missing_deps[*]}"
         return $?
     }

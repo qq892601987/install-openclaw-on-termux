@@ -10,7 +10,7 @@
 #   --verbose, -v    Enable verbose output (shows command execution details)
 #   --dry-run, -d    Dry run mode (simulate execution without making changes)
 #   --uninstall, -u  Uninstall Openclaw and clean up configurations
-#   --update, -U     Force update Openclaw to latest version without prompting
+#   --update, -U     Install the target version without prompting, even if already installed
 #   --version, -V    Specify Openclaw version to install (e.g., --version 1.2.3)
 #
 # Examples:
@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --verbose, -v    启用详细输出"
             echo "  --dry-run, -d    模拟运行，不执行实际命令"
             echo "  --uninstall, -u  卸载 Openclaw 和相关配置"
-            echo "  --update, -U     强制更新到最新版本"
+            echo "  --update, -U     强制安装目标版本（默认 latest，同版本也重装）"
             echo "  --version, -V    指定 Openclaw 版本号（如 2026.2.26）"
             echo "  --help, -h       显示此帮助信息"
             echo ""
@@ -219,13 +219,15 @@ check_deps() {
     if [ ${#MISSING_DEPS[@]} -ne 0 ]; then
         log "缺失依赖: ${MISSING_DEPS[*]}"
         echo -e "${YELLOW}检查可能的组件缺失: ${MISSING_DEPS[*]}${NC}"
-        run_cmd pkg upgrade -y
+        run_cmd env DEBIAN_FRONTEND=noninteractive pkg upgrade -y \
+            -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
         if [ $? -ne 0 ]; then
             log "pkg upgrade 失败"
             echo -e "${RED}错误：pkg 升级失败${NC}"
             exit 1
         fi
-        run_cmd pkg install "${MISSING_DEPS[@]}" -y
+        run_cmd env DEBIAN_FRONTEND=noninteractive pkg install "${MISSING_DEPS[@]}" -y \
+            -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold
         if [ $? -ne 0 ]; then
             log "依赖安装失败"
             echo -e "${RED}错误：依赖安装失败${NC}"
@@ -323,7 +325,7 @@ configure_npm() {
     local install_needed=1
     if [ -n "$INSTALLED_VERSION" ]; then
         echo -e "${BLUE}已安装 OpenClaw: $INSTALLED_VERSION${NC}"
-        if [ "$INSTALLED_VERSION" = "$resolved" ]; then
+        if [ "$INSTALLED_VERSION" = "$resolved" ] && [ "$FORCE_UPDATE" -eq 0 ]; then
             install_needed=0
         elif [ "$FORCE_UPDATE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
             read -p "是否安装 ${resolved}（当前 ${INSTALLED_VERSION}）? (y/n) [默认: y]: " UPDATE_CHOICE
@@ -515,7 +517,7 @@ ocr() {
     sleep 1
     tmux new -d -s openclaw || return 1
     sleep 1
-    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured 2>&1 | tee '$LOG_DIR/runtime.log'" C-m || return 1
+    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --allow-unconfigured 2>&1 | tee '$LOG_DIR/runtime.log'" C-m || return 1
     local deadline remaining
     deadline=\$((SECONDS + 180))
     while (( (remaining = deadline - SECONDS) > 0 )); do
@@ -626,7 +628,7 @@ start_service() {
     sleep 1
     
     # 将输出重定向到一个临时文件，如果 tmux 崩了也能看到报错
-    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --token \\\$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured 2>&1 | tee $LOG_DIR/runtime.log" C-m
+    tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=$HOME/tmp OPENCLAW_GATEWAY_TOKEN=\$OPENCLAW_GATEWAY_TOKEN; openclaw gateway --bind loopback --port $PORT --allow-unconfigured 2>&1 | tee $LOG_DIR/runtime.log" C-m
     
     log "服务指令已发送"
     echo ""
@@ -706,7 +708,9 @@ if [ "$UNINSTALL" -eq 1 ]; then
     [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 0 || return 0
 fi
 
-clear
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "$TERM" != dumb ]; then
+    clear
+fi
 if [ $DRY_RUN -eq 1 ]; then
     echo -e "${YELLOW}🔍 模拟运行模式：不执行实际命令${NC}"
 fi
@@ -869,7 +873,7 @@ if [[ "$CONTINUE_ONBOARD" =~ ^[Yy]$ ]]; then
             sleep 1
             tmux new -d -s openclaw
             sleep 1
-            tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=$TOKEN; openclaw gateway --bind loopback --port $PORT --token \$OPENCLAW_GATEWAY_TOKEN --allow-unconfigured 2>&1 | tee $LOG_DIR/runtime.log" C-m
+            tmux send-keys -t openclaw "export PATH=$NPM_BIN:\$PATH TMPDIR=\$HOME/tmp OPENCLAW_GATEWAY_TOKEN=$TOKEN; openclaw gateway --bind loopback --port $PORT --allow-unconfigured 2>&1 | tee $LOG_DIR/runtime.log" C-m
             if wait_for_gateway; then
                 log "Gateway HTTP 就绪"
                 echo -e "${GREEN}✅ Gateway /healthz 就绪（不代表模型功能可用）${NC}"
